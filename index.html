@@ -45,7 +45,7 @@
 
           <video id="vid" playsinline muted style="display:none; width:256px; border-radius:8px;"></video>
           <button id="snapBtn" style="display:none; font-size:14px; padding:10px;">Capture &amp; upload</button>
-          <button id="delAllBtn" style="font-size:14px; padding:10px;">Delete all pictures</button>
+          <button id="delAllBtn" style="font-size:14px; padding:10px;">Clear image</button>
 
           <div id="uMsg" style="font-size:12px; opacity:.85; word-break:break-word;"></div>
         </div>
@@ -68,13 +68,43 @@
     let sketchApi = null;
     let latestServerUrl = null;
 
+    /*
+     * Image source logic — works on both PHP servers and static hosts (GitHub Pages).
+     *
+     * 1. Try the PHP endpoint (api/images.php) — works on a real server.
+     * 2. Fall back to a static manifest (uploads/images.json) — works on GitHub Pages.
+     * 3. File picker & camera load images directly into p5 (no server round-trip).
+     */
     async function fetchImages() {
       try {
-        const r = await fetch("api/images.php", { cache: "no-store" });
-        if (!r.ok) throw new Error("images endpoint HTTP " + r.status);
-        const data = await r.json();
-        const urls = Array.isArray(data.images) ? data.images : [];
-        const newest = urls[0] || null;
+        let images = null;
+
+        // Try PHP endpoint first
+        try {
+          const r = await fetch("api/images.php", { cache: "no-store" });
+          if (r.ok) {
+            const ct = (r.headers.get("content-type") || "").toLowerCase();
+            if (ct.includes("json")) {
+              const data = await r.json();
+              images = Array.isArray(data.images) ? data.images : [];
+            }
+          }
+        } catch (_) { /* not available */ }
+
+        // Fall back to static manifest
+        if (images === null) {
+          try {
+            const r2 = await fetch("uploads/images.json", { cache: "no-store" });
+            if (r2.ok) {
+              const data2 = await r2.json();
+              images = Array.isArray(data2.images) ? data2.images : [];
+            }
+          } catch (_) { /* not available either */ }
+        }
+
+        if (!images) return;
+
+        const newest = images[0] || null;
 
         if (newest !== latestServerUrl) {
           latestServerUrl = newest;
@@ -88,7 +118,7 @@
     }
 
     fetchImages();
-    setInterval(fetchImages, 2000);
+    setInterval(fetchImages, 4000);
 
     /* ===================================================================
        Aprilis10.pde  →  p5.js  (instance mode)
@@ -152,7 +182,7 @@
 
       let p8state=0, p8timer=0, f6SlideY=0;
 
-      /* --- server image handling --- */
+      /* --- image source handling --- */
       let currentSourceUrl = null;
       let activeLoadToken = 0;
       let imageReady = false;
@@ -563,9 +593,24 @@
         initArrays();
 
         sketchApi = {
+          /* Load from a URL (server image or object URL from local file) */
           setServerImage(url) {
             if (url === currentSourceUrl && imageReady) return;
             loadServerImage(url);
+          },
+          /* Load directly from a p5.Image (used by local file / camera) */
+          setLocalImage(pImg) {
+            if (!pImg) return;
+            currentSourceUrl = "__local__" + Date.now();
+            img = pImg;
+            usingCapture = false;
+            capturedF6 = null;
+            initFromImage();
+          },
+          clearImage() {
+            currentSourceUrl = null;
+            imageReady = false;
+            img = null;
           }
         };
 
@@ -603,7 +648,6 @@
       p.draw = () => {
         p.background(230, 228, 222);
 
-        /* Compute scaling to fit design into container */
         const scale = Math.min(viewW / DESIGN_W, viewH / DESIGN_H);
         const drawW = DESIGN_W * scale;
         const drawH = DESIGN_H * scale;
@@ -615,7 +659,6 @@
         p.scale(scale);
 
         if (!imageReady || !img) {
-          /* Waiting state — draw empty frames + message */
           p.stroke(28,28,90); p.strokeWeight(2.0); p.noFill();
           p.rect(r1x,r1y,r1w,r1h);
           p.rect(r2x,r2y,r2w,r2h);
@@ -630,7 +673,7 @@
           return;
         }
 
-        /* === Phase logic (direct port from PDE draw()) === */
+        /* === Phase logic === */
 
         if (phase === 0) {
           renderToFullImg();
@@ -808,7 +851,7 @@
 
     new p5(sketch);
 
-    /* ===== Upload / Camera / Delete UI ===== */
+    /* ===== Upload / Camera / Clear UI ===== */
     const pick = document.getElementById("pick");
     const camBtn = document.getElementById("camBtn");
     const snapBtn = document.getElementById("snapBtn");
@@ -821,26 +864,35 @@
       uMsg.textContent = t || "";
     }
 
-    async function uploadBlob(blob, filename = "capture.jpg") {
-      const fd = new FormData();
-      fd.append("photo", blob, filename);
-
-      setMsg("Uploading...");
-      const r = await fetch("api/upload.php", { method: "POST", body: fd });
-
-      if (!r.ok) {
-        const text = await r.text().catch(() => "");
-        throw new Error(`HTTP ${r.status}${text ? " — " + text : ""}`);
-      }
-
-      const data = await r.json().catch(() => ({}));
-
-      setMsg("Uploaded.");
-      await fetchImages();
-      return data;
+    /**
+     * Load a File/Blob directly into the p5 sketch (no server needed).
+     * Works on GitHub Pages and any static host.
+     */
+    async function loadLocalBlob(blob) {
+      const url = URL.createObjectURL(blob);
+      setMsg("Loading image...");
+      /* Use a temporary HTML image to get pixel data into a p5.Image */
+      const htmlImg = new Image();
+      htmlImg.crossOrigin = "anonymous";
+      htmlImg.onload = () => {
+        /* Create a p5-compatible image via a hidden canvas */
+        const c = document.createElement("canvas");
+        c.width = htmlImg.naturalWidth;
+        c.height = htmlImg.naturalHeight;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(htmlImg, 0, 0);
+        /* Use the sketch's loadImage with the object URL */
+        if (sketchApi) sketchApi.setServerImage(url);
+        setMsg("Image loaded.");
+      };
+      htmlImg.onerror = () => {
+        setMsg("Failed to load image.");
+        URL.revokeObjectURL(url);
+      };
+      htmlImg.src = url;
     }
 
-    async function fileToUploadBlob(file) {
+    async function fileToUsableBlob(file) {
       const type = (file.type || "").toLowerCase();
       const name = (file.name || "").toLowerCase();
       const isHeic = type.includes("heic") || type.includes("heif") || name.endsWith(".heic") || name.endsWith(".heif");
@@ -852,16 +904,38 @@
       return Array.isArray(out) ? out[0] : out;
     }
 
+    /* --- Also try uploading to server (works when PHP is available) --- */
+    async function tryServerUpload(blob, filename) {
+      try {
+        const fd = new FormData();
+        fd.append("photo", blob, filename);
+        const r = await fetch("api/upload.php", { method: "POST", body: fd });
+        if (r.ok) {
+          const ct = (r.headers.get("content-type") || "").toLowerCase();
+          if (ct.includes("json")) {
+            await r.json();
+            await fetchImages();
+            return true;
+          }
+        }
+      } catch (_) { /* server not available */ }
+      return false;
+    }
+
     pick.addEventListener("change", async (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
       try {
-        const blob = await fileToUploadBlob(file);
+        const blob = await fileToUsableBlob(file);
+        /* Try server first; always fall back to local loading */
         const ext = blob.type === "image/png" ? ".png" : ".jpg";
-        await uploadBlob(blob, "upload" + ext);
+        const uploaded = await tryServerUpload(blob, "upload" + ext);
+        if (!uploaded) {
+          await loadLocalBlob(blob);
+        }
       } catch (err) {
         console.error(err);
-        setMsg("Upload failed: " + err.message);
+        setMsg("Load failed: " + err.message);
       } finally {
         pick.value = "";
       }
@@ -897,7 +971,10 @@
         const blob = await new Promise((resolve) => c.toBlob(resolve, "image/jpeg", 0.92));
         if (!blob) throw new Error("Could not create image blob");
 
-        await uploadBlob(blob, "camera.jpg");
+        const uploaded = await tryServerUpload(blob, "camera.jpg");
+        if (!uploaded) {
+          await loadLocalBlob(blob);
+        }
       } catch (err) {
         console.error(err);
         setMsg("Capture failed: " + err.message);
@@ -907,30 +984,22 @@
     const delAllBtn = document.getElementById("delAllBtn");
 
     delAllBtn.addEventListener("click", async () => {
-      if (!confirm("Delete ALL uploaded pictures? This cannot be undone.")) return;
+      /* On static hosts, just clear the current sketch image */
+      if (sketchApi) sketchApi.clearImage();
+      latestServerUrl = null;
+      setMsg("Image cleared.");
 
+      /* Also try the server endpoint if available */
       try {
-        setMsg("Deleting...");
-
         const r = await fetch("api/delete_all.php", { method: "POST" });
-
-        if (!r.ok) {
-          const text = await r.text().catch(() => "");
-          throw new Error(`HTTP ${r.status}${text ? " — " + text : ""}`);
+        if (r.ok) {
+          const ct = (r.headers.get("content-type") || "").toLowerCase();
+          if (ct.includes("json")) {
+            const data = await r.json();
+            setMsg("Deleted " + (data.deleted || 0) + " file(s).");
+          }
         }
-
-        const data = await r.json().catch(() => ({}));
-
-        setMsg(`Deleted ${data.deleted ?? 0} file(s).`);
-
-        latestServerUrl = null;
-        if (sketchApi) sketchApi.setServerImage(null);
-
-        await fetchImages();
-      } catch (e) {
-        console.error(e);
-        setMsg("Delete failed: " + e.message);
-      }
+      } catch (_) { /* server not available, already cleared locally */ }
     });
   </script>
 </body>
