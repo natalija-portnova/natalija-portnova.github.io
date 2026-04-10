@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>QR + p5 Player</title>
+  <script src="https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js"></script>
+
+  <style>
+    html, body { height:100%; margin:0; background:#fff; }
+    body { font-family: system-ui, sans-serif; }
+    #wrap { height:100%; display:flex; }
+    #left {
+      width: 320px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      border-right:1px solid #eee;
+      background:#fff;
+      box-sizing:border-box;
+    }
+    #qr { width:256px; height:256px; }
+    #right {
+      flex:1;
+      position:relative;
+      overflow:hidden;
+      background:#fff;
+    }
+    #sketch {
+      position:absolute;
+      inset:0;
+    }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="left">
+      <div style="display:flex; flex-direction:column; align-items:center; gap:12px; padding:12px;">
+        <div id="qr"></div>
+
+        <div style="display:flex; flex-direction:column; gap:8px; width:256px;">
+          <input id="pick" type="file" accept="image/*" style="font-size:14px;">
+          <button id="camBtn" style="font-size:14px; padding:10px;">Use camera</button>
+
+          <video id="vid" playsinline muted style="display:none; width:256px; border-radius:8px;"></video>
+          <button id="snapBtn" style="display:none; font-size:14px; padding:10px;">Capture &amp; upload</button>
+          <button id="delAllBtn" style="font-size:14px; padding:10px;">Delete all pictures</button>
+
+          <div id="uMsg" style="font-size:12px; opacity:.85; word-break:break-word;"></div>
+        </div>
+      </div>
+    </div>
+    <div id="right"><div id="sketch"></div></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.3/lib/p5.min.js"></script>
+
+  <script>
+    const uploadUrl = new URL("upload.html", window.location.href).toString();
+    new QRCode(document.getElementById("qr"), {
+      text: uploadUrl,
+      width: 256,
+      height: 256
+    });
+
+    let sketchApi = null;
+    let latestServerUrl = null;
+
+    async function fetchImages() {
+      try {
+        const r = await fetch("api/images.php", { cache: "no-store" });
+        if (!r.ok) throw new Error("images endpoint HTTP " + r.status);
+        const data = await r.json();
+        const urls = Array.isArray(data.images) ? data.images : [];
+        const newest = urls[0] || null;
+
+        if (newest !== latestServerUrl) {
+          latestServerUrl = newest;
+          if (sketchApi) sketchApi.setServerImage(newest);
+        } else if (!newest && sketchApi) {
+          sketchApi.setServerImage(null);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    fetchImages();
+    setInterval(fetchImages, 2000);
+
+    /* ===================================================================
+       Aprilis10.pde  →  p5.js  (instance mode)
+       =================================================================== */
+    const sketch = (p) => {
+      const container = document.getElementById("sketch");
+
+      const DESIGN_W = 1100;
+      const DESIGN_H = 660;
+
+      /* --- layout constants (from PDE) --- */
+      const cell = 68;
+      const r1x=58,  r1y=24,  r1w=204,    r1h=340;
+      const r3x=312, r3y=198, r3w=7*cell,  r3h=cell;
+      const r2x=312, r2y=296, r2w=cell,    r2h=cell;
+      let   r5x,     r5y=296, r5w=cell,    r5h=cell;
+      const r4x=312, r4y=394, r4w=7*cell,  r4h=cell;
+      const r6x=838, r6y=296, r6w=204,     r6h=340;
+
+      const cols=3, rows=5, totalCells=15;
+      const speed=0.003, maxBlur=8;
+      const blurSteps=60;
+
+      /* --- mutable state --- */
+      let viewW=1, viewH=1;
+      let img=null;
+      let fullImg=null;
+      let lastFrame=null;
+      let imgW, imgH, slideY, stopAt;
+      let phase=0;
+      let slideT=0, fallT=0, moveT=0, shiftT=0;
+      let blurredFrames=null;
+      let avgDarkness=-1;
+      let cellCategory=null;
+      let iteration=0;
+      let colDrops=[0,0,0];
+      let colScreenX, colShiftFrom, colShiftTo;
+      let curCX=2, curCY=4;
+      let lightCount=0, darkCount=0;
+      let lightSlots, darkSlots;
+      let isDarkest=false, colShiftActive=false;
+
+      let cycleOrder=null;
+      let cycleIter=0;
+      let f3Exited=0, f4Exited=0;
+      let stepShiftT=0;
+      let stepShiftActive=false;
+      let exitOrigCX=-1, exitOrigCY=-1;
+      let exitCellImg=null;
+      let outSlideT=0, toF6T=0;
+      let phase4timer=0;
+
+      let rotDeg=0, rotAngle=0, ROT_DEG_PER_FRAME;
+
+      let f6Count2=0;
+      let f6Data=[];
+      let f6Used=[];
+
+      let capturedF6=null;
+      let usingCapture=false;
+
+      let p8state=0, p8timer=0, f6SlideY=0;
+
+      /* --- server image handling --- */
+      let currentSourceUrl = null;
+      let activeLoadToken = 0;
+      let imageReady = false;
+
+      function cacheBust(url) {
+        const sep = url.includes("?") ? "&" : "?";
+        return url + sep + "t=" + Date.now();
+      }
+
+      function initArrays() {
+        lightSlots = Array.from({length:7}, () => [0,0]);
+        darkSlots  = Array.from({length:7}, () => [0,0]);
+        f6Data     = Array.from({length:14}, () => [0,0,0,0]);
+        f6Used     = new Array(cols*rows).fill(false);
+      }
+
+      function initFromImage() {
+        if (!img) return;
+        fullImg = p.createGraphics(Math.round(r1w), Math.round(r1h));
+        let sc = Math.max(r1w, r1h) / Math.max(img.width, img.height);
+        imgW = img.height * sc;
+        imgH = img.width  * sc;
+        slideY = -imgH;
+        stopAt = Math.max(0, r1h - imgH);
+        colScreenX   = [r1x, r1x+cell, r1x+2*cell];
+        colShiftFrom = colScreenX.slice();
+        colShiftTo   = colScreenX.slice();
+        resetCycle1();
+        f6Count2 = 0;
+        for (let i = 0; i < cols*rows; i++) f6Used[i] = false;
+        phase = 0;
+        imageReady = true;
+      }
+
+      /* ---- rendering helpers ---- */
+      function renderToFullImg() {
+        let relX = (r1w - imgW) / 2.0;
+        let sc2  = imgH / img.width;
+        fullImg.push();
+        fullImg.background(230,228,222);
+        fullImg.translate(relX + imgW/2.0, slideY + imgH/2.0);
+        fullImg.rotate(p.HALF_PI);
+        fullImg.imageMode(p.CENTER);
+        if (usingCapture && capturedF6) {
+          fullImg.image(capturedF6, 0, 0, img.width*sc2, img.height*sc2);
+        } else {
+          fullImg.image(img, 0, 0, img.width*sc2, img.height*sc2);
+        }
+        fullImg.imageMode(p.CORNER);
+        fullImg.pop();
+      }
+
+      function analyzeDarkness() {
+        let snap = fullImg.get();
+        snap.loadPixels();
+        let totalD = 0;
+        let cnt = snap.width * snap.height;
+        for (let i = 0; i < cnt; i++) {
+          let idx = i * 4;
+          let br = 0.2126*snap.pixels[idx] + 0.7152*snap.pixels[idx+1] + 0.0722*snap.pixels[idx+2];
+          totalD += (255 - br);
+        }
+        avgDarkness = totalD / cnt;
+
+        let cd = new Float32Array(totalCells);
+        for (let cx = 0; cx < cols; cx++) {
+          for (let cy = 0; cy < rows; cy++) {
+            let s = 0, n = 0;
+            for (let px = Math.floor(cx*cell); px < Math.floor((cx+1)*cell); px++) {
+              for (let py = Math.floor(cy*cell); py < Math.floor((cy+1)*cell); py++) {
+                if (px < snap.width && py < snap.height) {
+                  let idx2 = (py * snap.width + px) * 4;
+                  let br2 = 0.2126*snap.pixels[idx2] + 0.7152*snap.pixels[idx2+1] + 0.0722*snap.pixels[idx2+2];
+                  s += (255 - br2);
+                  n++;
+                }
+              }
+            }
+            cd[cy*cols + cx] = (n > 0) ? s / n : 0;
+          }
+        }
+
+        let indices = Array.from({length: totalCells}, (_, i) => i);
+        indices.sort((a, b) => cd[b] - cd[a]);
+        cellCategory = new Int32Array(totalCells);
+        for (let rank = 0; rank < totalCells; rank++) {
+          let i = indices[rank];
+          cellCategory[i] = (rank === 0) ? 2 : (rank <= 7) ? 1 : 0;
+        }
+      }
+
+      function precomputeBlurFrames() {
+        blurredFrames = new Array(blurSteps);
+        for (let s = 0; s < blurSteps; s++) {
+          let f = fullImg.get();
+          let b = p.map(s, 0, blurSteps-1, 0, maxBlur);
+          if (b > 0) f.filter(p.BLUR, b);
+          blurredFrames[s] = f;
+        }
+        lastFrame = blurredFrames[blurSteps - 1];
+      }
+
+      function resetCycle1() {
+        iteration = 0; lightCount = 0; darkCount = 0;
+        colDrops = [0, 0, 0];
+        colScreenX   = [r1x, r1x+cell, r1x+2*cell];
+        colShiftFrom = colScreenX.slice();
+        colShiftTo   = colScreenX.slice();
+        colShiftActive = false;
+        lightSlots = Array.from({length:7}, () => [0,0]);
+        darkSlots  = Array.from({length:7}, () => [0,0]);
+      }
+
+      function initIteration() {
+        curCX = 2 - Math.floor(iteration / rows);
+        curCY = rows - 1 - (iteration % rows);
+      }
+
+      function easeInOut(t) {
+        return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2.0;
+      }
+
+      /* ---- clipping helpers (replaces Processing clip/noClip) ---- */
+      function clipRect(x, y, w, h) {
+        let ctx = p.drawingContext;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, w, h);
+        ctx.clip();
+      }
+      function noClip() {
+        p.drawingContext.restore();
+      }
+
+      function drawCellAt(sx, sy, origCX, origCY, fx, fy, fw, fh) {
+        let ix = Math.max(sx, fx), iy = Math.max(sy, fy);
+        let iw = Math.min(sx+cell, fx+fw) - ix;
+        let ih = Math.min(sy+cell, fy+fh) - iy;
+        if (iw <= 0 || ih <= 0) return;
+        clipRect(ix, iy, Math.ceil(iw), Math.ceil(ih));
+        p.image(lastFrame, sx - origCX*cell, sy - origCY*cell);
+        noClip();
+      }
+
+      function drawRotatedCellAt(cx, cy, angleDeg, fx, fy, fw, fh) {
+        let ix = Math.max(cx, fx), iy = Math.max(cy, fy);
+        let iw = Math.min(cx+cell, fx+fw) - ix;
+        let ih = Math.min(cy+cell, fy+fh) - iy;
+        if (iw <= 0 || ih <= 0) return;
+        clipRect(ix, iy, Math.ceil(iw), Math.ceil(ih));
+        p.push();
+        p.translate(cx + cell/2.0, cy + cell/2.0);
+        p.rotate(p.radians(angleDeg));
+        p.imageMode(p.CENTER);
+        p.image(exitCellImg, 0, 0, cell, cell);
+        p.imageMode(p.CORNER);
+        p.pop();
+        noClip();
+      }
+
+      function drawColumn(cx, screenX, dropped, isFalling, fp) {
+        if (dropped >= rows) return;
+        let clipX = Math.max(screenX, r1x);
+        let clipW = Math.min(screenX + cell, r1x + r1w) - clipX;
+        if (clipW <= 0) return;
+        let imageY = r1y + (dropped + (isFalling ? fp : 0)) * cell;
+        let clipH = isFalling ? (rows - 1 + fp) * cell - 1 : r1h;
+        clipH = Math.min(clipH, r1h);
+        if (clipH <= 0) return;
+        clipRect(clipX, r1y, Math.ceil(clipW), Math.floor(clipH));
+        p.image(lastFrame, screenX - cx*cell, imageY);
+        noClip();
+      }
+
+      function drawFrame1(activeCX, fp) {
+        p.noStroke(); p.fill(230,228,222); p.rect(r1x,r1y,r1w,r1h);
+        for (let cx = 0; cx < cols; cx++) {
+          drawColumn(cx, colScreenX[cx], colDrops[cx],
+                     (cx === activeCX),
+                     (cx === activeCX) ? fp : 0);
+        }
+      }
+
+      function drawCells(sf, bs) {
+        p.noStroke(); p.fill(230,228,222); p.rect(r1x,r1y,r1w,r1h);
+        let ds = cell * sf;
+        let frame = blurredFrames[bs];
+        for (let cx = 0; cx < cols; cx++) {
+          for (let cy = 0; cy < rows; cy++) {
+            let scx = r1x + cx*cell + cell/2.0;
+            let scy = r1y + cy*cell + cell/2.0;
+            clipRect(scx - ds/2, scy - ds/2, Math.ceil(ds), Math.ceil(ds));
+            p.image(frame, r1x, r1y);
+            noClip();
+          }
+        }
+      }
+
+      function drawPlacedCells() {
+        for (let k = 0; k < lightCount; k++) {
+          let sx = r3x + k * cell;
+          clipRect(sx, r3y, cell, cell);
+          p.image(lastFrame, sx - lightSlots[k][0]*cell, r3y - lightSlots[k][1]*cell);
+          noClip();
+        }
+        for (let k = 0; k < darkCount; k++) {
+          let sx = r4x + k * cell;
+          clipRect(sx, r4y, cell, cell);
+          p.image(lastFrame, sx - darkSlots[k][0]*cell, r4y - darkSlots[k][1]*cell);
+          noClip();
+        }
+      }
+
+      function advanceShift() {
+        if (!colShiftActive) return;
+        shiftT = Math.min(shiftT + speed*3.0, 1.0);
+        let se = easeInOut(shiftT);
+        for (let cx = 0; cx < cols; cx++) {
+          colScreenX[cx] = p.lerp(colShiftFrom[cx], colShiftTo[cx], se);
+        }
+      }
+
+      function completeIteration() {
+        let cat = cellCategory[curCY*cols + curCX];
+        if (cat === 0) {
+          lightSlots[lightCount][0] = curCX;
+          lightSlots[lightCount][1] = curCY;
+          lightCount++;
+        } else if (cat === 1) {
+          darkSlots[darkCount][0] = curCX;
+          darkSlots[darkCount][1] = curCY;
+          darkCount++;
+        }
+        colDrops[curCX]++;
+        if (colShiftActive) {
+          for (let cx = 0; cx < cols; cx++) colScreenX[cx] = colShiftTo[cx];
+          colShiftActive = false;
+        }
+        iteration++;
+        if (iteration >= totalCells) { phase = 4; phase4timer = 0; return; }
+        initIteration();
+        phase = 2; slideT = 0; fallT = 0;
+      }
+
+      function setupCycle() {
+        let startLight = p.random(1) < 0.5;
+        cycleOrder = new Array(14);
+        for (let i = 0; i < 14; i++) {
+          cycleOrder[i] = startLight ? (i % 2 === 0) : (i % 2 === 1);
+        }
+        cycleIter = 0; f3Exited = 0; f4Exited = 0;
+        stepShiftT = 0; stepShiftActive = false;
+        f6Count2 = 0;
+        for (let i = 0; i < cols*rows; i++) f6Used[i] = false;
+      }
+
+      function startCycleStep() {
+        let fromLight = cycleOrder[cycleIter];
+        if (fromLight) {
+          let j = lightCount - f3Exited - 1;
+          exitOrigCX = lightSlots[j][0];
+          exitOrigCY = lightSlots[j][1];
+        } else {
+          let j = darkCount - f4Exited - 1;
+          exitOrigCX = darkSlots[j][0];
+          exitOrigCY = darkSlots[j][1];
+        }
+        exitCellImg = lastFrame.get(
+          exitOrigCX * Math.floor(cell),
+          exitOrigCY * Math.floor(cell),
+          Math.floor(cell), Math.floor(cell)
+        );
+        outSlideT = 0; rotDeg = 0; toF6T = 0;
+        rotAngle = Math.floor(p.random(1, 5)) * 90.0;
+        stepShiftT = 0; stepShiftActive = false;
+        phase = 5;
+      }
+
+      function completeCycleStep() {
+        let fromLight = cycleOrder[cycleIter];
+        if (fromLight) f3Exited++;
+        else f4Exited++;
+        stepShiftT = 0; stepShiftActive = false;
+
+        let slot;
+        if (f6Count2 === 0) {
+          slot = 0; f6Used[0] = true;
+        } else {
+          let avail = [];
+          for (let i = 0; i < cols*rows; i++) {
+            if (!f6Used[i]) avail.push(i);
+          }
+          slot = avail[Math.floor(p.random(avail.length))];
+          f6Used[slot] = true;
+        }
+        f6Data[f6Count2][0] = slot;
+        f6Data[f6Count2][1] = exitOrigCX;
+        f6Data[f6Count2][2] = exitOrigCY;
+        f6Data[f6Count2][3] = Math.floor(rotAngle);
+        f6Count2++;
+        cycleIter++;
+        if (cycleIter >= 14) { phase = 8; p8state = 0; p8timer = 0; f6SlideY = 0; return; }
+        startCycleStep();
+      }
+
+      function drawFrame3Out(lightStep) {
+        p.noStroke(); p.fill(230,228,222); p.rect(r3x,r3y,r3w,r3h);
+        let rem = lightCount - f3Exited;
+        if (rem <= 0) return;
+        let drawCount = lightStep ? rem - 1 : rem;
+        let shiftOff = (lightStep && stepShiftActive) ? easeInOut(stepShiftT)*cell : 0;
+        for (let j = 0; j < drawCount; j++) {
+          let sx = r3x + (j + f3Exited)*cell + shiftOff;
+          let ix = Math.max(sx, r3x);
+          let iw = Math.min(sx + cell, r3x + r3w) - ix;
+          if (iw <= 0) continue;
+          clipRect(ix, r3y, Math.ceil(iw), r3h);
+          p.image(lastFrame, sx - lightSlots[j][0]*cell, r3y - lightSlots[j][1]*cell);
+          noClip();
+        }
+      }
+
+      function drawFrame4Out(darkStep) {
+        p.noStroke(); p.fill(230,228,222); p.rect(r4x,r4y,r4w,r4h);
+        let rem = darkCount - f4Exited;
+        if (rem <= 0) return;
+        let drawCount = darkStep ? rem - 1 : rem;
+        let shiftOff = (darkStep && stepShiftActive) ? easeInOut(stepShiftT)*cell : 0;
+        for (let j = 0; j < drawCount; j++) {
+          let sx = r4x + (j + f4Exited)*cell + shiftOff;
+          let ix = Math.max(sx, r4x);
+          let iw = Math.min(sx + cell, r4x + r4w) - ix;
+          if (iw <= 0) continue;
+          clipRect(ix, r4y, Math.ceil(iw), r4h);
+          p.image(lastFrame, sx - darkSlots[j][0]*cell, r4y - darkSlots[j][1]*cell);
+          noClip();
+        }
+      }
+
+      function drawFrame6(slideOffset) {
+        p.noStroke(); p.fill(230,228,222); p.rect(r6x,r6y,r6w,r6h);
+        for (let i = 0; i < f6Count2; i++) {
+          let slotVal = f6Data[i][0];
+          let gcx = slotVal % cols, gcy = Math.floor(slotVal / cols);
+          let sx = r6x + gcx*cell;
+          let sy = r6y + gcy*cell + slideOffset;
+          let angleDeg = f6Data[i][3];
+          let ix = Math.max(sx, r6x), iy = Math.max(sy, r6y);
+          let iw = Math.min(sx+cell, r6x+r6w) - ix;
+          let ih = Math.min(sy+cell, r6y+r6h) - iy;
+          if (iw <= 0 || ih <= 0) continue;
+          clipRect(ix, iy, Math.ceil(iw), Math.ceil(ih));
+          let c = lastFrame.get(
+            f6Data[i][1]*Math.floor(cell),
+            f6Data[i][2]*Math.floor(cell),
+            Math.floor(cell), Math.floor(cell)
+          );
+          p.push();
+          p.translate(sx + cell/2.0, sy + cell/2.0);
+          p.rotate(p.radians(angleDeg));
+          p.imageMode(p.CENTER);
+          p.image(c, 0, 0, cell, cell);
+          p.imageMode(p.CORNER);
+          p.pop();
+          noClip();
+        }
+      }
+
+      function captureFrame6() {
+        let pg = p.createGraphics(Math.round(r6w), Math.round(r6h));
+        pg.background(230,228,222);
+        for (let i = 0; i < f6Count2; i++) {
+          let slotVal = f6Data[i][0];
+          let gcx = slotVal % cols, gcy = Math.floor(slotVal / cols);
+          let sx = gcx*cell, sy = gcy*cell;
+          let angleDeg = f6Data[i][3];
+          let c = lastFrame.get(
+            f6Data[i][1]*Math.floor(cell),
+            f6Data[i][2]*Math.floor(cell),
+            Math.floor(cell), Math.floor(cell)
+          );
+          pg.push();
+          pg.translate(sx + cell/2.0, sy + cell/2.0);
+          pg.rotate(p.radians(angleDeg));
+          pg.imageMode(p.CENTER);
+          pg.image(c, 0, 0, cell, cell);
+          pg.imageMode(p.CORNER);
+          pg.pop();
+        }
+        capturedF6 = pg.get();
+      }
+
+      /* ==== p5 lifecycle ==== */
+
+      p.setup = () => {
+        const rect = container.getBoundingClientRect();
+        viewW = Math.max(1, Math.floor(rect.width));
+        viewH = Math.max(1, Math.floor(rect.height));
+
+        const cnv = p.createCanvas(viewW, viewH);
+        cnv.parent("sketch");
+        p.pixelDensity(1);
+        p.frameRate(60);
+
+        r5x = r3x + r3w - r5w;
+        ROT_DEG_PER_FRAME = 360.0 * speed * 1.2;
+
+        initArrays();
+
+        sketchApi = {
+          setServerImage(url) {
+            if (url === currentSourceUrl && imageReady) return;
+            loadServerImage(url);
+          }
+        };
+
+        if (latestServerUrl) {
+          sketchApi.setServerImage(latestServerUrl);
+        }
+      };
+
+      function loadServerImage(url) {
+        if (!url) {
+          currentSourceUrl = null;
+          imageReady = false;
+          img = null;
+          return;
+        }
+        currentSourceUrl = url;
+        const token = ++activeLoadToken;
+
+        p.loadImage(
+          cacheBust(url),
+          (loaded) => {
+            if (token !== activeLoadToken) return;
+            img = loaded;
+            usingCapture = false;
+            capturedF6 = null;
+            initFromImage();
+          },
+          (err) => {
+            if (token !== activeLoadToken) return;
+            console.error("Failed to load image", err);
+          }
+        );
+      }
+
+      p.draw = () => {
+        p.background(230, 228, 222);
+
+        /* Compute scaling to fit design into container */
+        const scale = Math.min(viewW / DESIGN_W, viewH / DESIGN_H);
+        const drawW = DESIGN_W * scale;
+        const drawH = DESIGN_H * scale;
+        const offsetX = (viewW - drawW) / 2;
+        const offsetY = (viewH - drawH) / 2;
+
+        p.push();
+        p.translate(offsetX, offsetY);
+        p.scale(scale);
+
+        if (!imageReady || !img) {
+          /* Waiting state — draw empty frames + message */
+          p.stroke(28,28,90); p.strokeWeight(2.0); p.noFill();
+          p.rect(r1x,r1y,r1w,r1h);
+          p.rect(r2x,r2y,r2w,r2h);
+          p.rect(r3x,r3y,r3w,r3h);
+          p.rect(r4x,r4y,r4w,r4h);
+          p.rect(r5x,r5y,r5w,r5h);
+          p.rect(r6x,r6y,r6w,r6h);
+          p.noStroke(); p.fill(90);
+          p.textAlign(p.CENTER, p.CENTER); p.textSize(18);
+          p.text("Upload an image to start", DESIGN_W/2, DESIGN_H/2);
+          p.pop();
+          return;
+        }
+
+        /* === Phase logic (direct port from PDE draw()) === */
+
+        if (phase === 0) {
+          renderToFullImg();
+          if (slideY < stopAt) slideY = Math.min(slideY + 1.5, stopAt);
+          else { analyzeDarkness(); precomputeBlurFrames(); phase = 1; slideT = 0; }
+          clipRect(r1x, r1y, r1w, r1h);
+          p.image(fullImg, r1x, r1y);
+          noClip();
+
+        } else if (phase === 1) {
+          slideT = Math.min(slideT + speed, 1.0);
+          let sf = 1.0 - 0.5 * Math.sin(slideT * Math.PI);
+          let bs = p.constrain(Math.floor(p.map(slideT, 0, 1, 0, blurSteps-1)), 0, blurSteps-1);
+          drawCells(sf, bs);
+          if (slideT >= 1.0) { initIteration(); phase = 2; slideT = 0; fallT = 0; }
+
+        } else if (phase === 2) {
+          let startX = colScreenX[curCX];
+          slideT = Math.min(slideT + speed*1.5, 1.0);
+          let curX = p.lerp(startX, r2x, easeInOut(slideT));
+          let f1Right = r1x + r1w;
+          if (curX >= f1Right) {
+            fallT = Math.min(fallT + speed*8.0, 1.0);
+            if (colDrops[curCX] === rows - 1 && !colShiftActive) {
+              colShiftFrom = colScreenX.slice();
+              colShiftTo   = colScreenX.slice();
+              for (let cx = 0; cx < curCX; cx++) colShiftTo[cx] += cell;
+              shiftT = 0; colShiftActive = true;
+            }
+          }
+          advanceShift();
+          drawFrame1(curCX, easeInOut(fallT));
+          drawCellAt(curX, r2y, curCX, curCY, r1x, r1y, r1w, r1h);
+          drawCellAt(curX, r2y, curCX, curCY, r2x, r2y, r2w, r2h);
+          drawPlacedCells();
+          if (slideT >= 1.0) {
+            isDarkest = (cellCategory[curCY*cols + curCX] === 2);
+            phase = 3; moveT = 0;
+          }
+
+        } else if (phase === 3) {
+          advanceShift();
+          drawFrame1(curCX, 1.0);
+          drawPlacedCells();
+          let cat = cellCategory[curCY*cols + curCX];
+          moveT = Math.min(moveT + speed*1.5, 1.0);
+          let e = easeInOut(moveT);
+          let mx, my;
+          let firstLight = (!isDarkest && cat === 0 && lightCount === 0);
+          let firstDark  = (!isDarkest && cat === 1 && darkCount === 0);
+          let isFirst = firstLight || firstDark;
+          if (isDarkest) {
+            mx = p.lerp(r2x, r2x + r2w, e); my = r2y;
+          } else if (cat === 0) {
+            mx = r2x; my = p.lerp(r2y, isFirst ? r3y : r2y - r2h, e);
+          } else {
+            mx = r2x; my = p.lerp(r2y, isFirst ? r4y : r2y + r2h, e);
+          }
+          drawCellAt(mx, my, curCX, curCY, r2x, r2y, r2w, r2h);
+          if (firstLight) drawCellAt(mx, my, curCX, curCY, r3x, r3y, r3w, r3h);
+          if (firstDark)  drawCellAt(mx, my, curCX, curCY, r4x, r4y, r4w, r4h);
+          if (moveT >= 1.0) completeIteration();
+
+        } else if (phase === 4) {
+          drawFrame1(-1, 0);
+          drawPlacedCells();
+          phase4timer++;
+          if (phase4timer > 90) { setupCycle(); startCycleStep(); }
+
+        } else if (phase === 5) {
+          outSlideT = Math.min(outSlideT + speed*1.5, 1.0);
+          let fromLight = cycleOrder[cycleIter];
+          let startY = fromLight ? r3y : r4y;
+          let curY = p.lerp(startY, r5y, easeInOut(outSlideT));
+          if (!stepShiftActive) {
+            let cleared = fromLight ? (curY > r3y + r3h) : (curY + cell < r4y);
+            if (cleared) { stepShiftActive = true; stepShiftT = 0; }
+          }
+          if (stepShiftActive) stepShiftT = Math.min(stepShiftT + speed*3.0, 1.0);
+          drawFrame1(-1, 0);
+          drawFrame3Out(fromLight);
+          drawFrame4Out(!fromLight);
+          if (fromLight) drawCellAt(r5x, curY, exitOrigCX, exitOrigCY, r3x, r3y, r3w, r3h);
+          else           drawCellAt(r5x, curY, exitOrigCX, exitOrigCY, r4x, r4y, r4w, r4h);
+          drawCellAt(r5x, curY, exitOrigCX, exitOrigCY, r5x, r5y, r5w, r5h);
+          drawFrame6(0);
+          if (outSlideT >= 1.0) phase = 6;
+
+        } else if (phase === 6) {
+          rotDeg = Math.min(rotDeg + ROT_DEG_PER_FRAME, rotAngle);
+          let fromLight = cycleOrder[cycleIter];
+          if (stepShiftActive) stepShiftT = Math.min(stepShiftT + speed*3.0, 1.0);
+          drawFrame1(-1, 0);
+          drawFrame3Out(fromLight);
+          drawFrame4Out(!fromLight);
+          drawFrame6(0);
+          let cx5 = r5x + r5w/2.0, cy5 = r5y + r5h/2.0;
+          p.push();
+          p.translate(cx5, cy5);
+          p.rotate(p.radians(rotDeg));
+          p.imageMode(p.CENTER);
+          p.image(exitCellImg, 0, 0, r5w, r5h);
+          p.noFill(); p.stroke(28,28,90); p.strokeWeight(2.0);
+          p.rectMode(p.CENTER); p.rect(0, 0, r5w, r5h); p.rectMode(p.CORNER);
+          p.imageMode(p.CORNER);
+          p.pop();
+          if (rotDeg >= rotAngle) { phase = 7; toF6T = 0; }
+
+        } else if (phase === 7) {
+          toF6T = Math.min(toF6T + speed*1.5, 1.0);
+          let fromLight = cycleOrder[cycleIter];
+          if (stepShiftActive) stepShiftT = Math.min(stepShiftT + speed*3.0, 1.0);
+          drawFrame1(-1, 0);
+          drawFrame3Out(fromLight);
+          drawFrame4Out(!fromLight);
+          drawFrame6(0);
+          if (f6Count2 === 0) {
+            let cx7 = p.lerp(r5x, r6x, easeInOut(toF6T));
+            drawRotatedCellAt(cx7, r5y, rotAngle, r5x, r5y, r5w, r5h);
+            drawRotatedCellAt(cx7, r5y, rotAngle, r6x, r6y, r6w, r6h);
+          } else {
+            let cx7 = p.lerp(r5x, r5x + r5w, easeInOut(toF6T));
+            drawRotatedCellAt(cx7, r5y, rotAngle, r5x, r5y, r5w, r5h);
+          }
+          if (toF6T >= 1.0) completeCycleStep();
+
+        } else if (phase === 8) {
+          drawFrame1(-1, 0);
+          drawFrame3Out(false);
+          drawFrame4Out(false);
+
+          if (p8state === 0) {
+            drawFrame6(0);
+            p8timer++;
+            if (p8timer >= 60) { p8state = 1; f6SlideY = 0; }
+          } else if (p8state === 1) {
+            f6SlideY = Math.min(f6SlideY + 2.5, r6h);
+            drawFrame6(f6SlideY);
+            if (f6SlideY >= r6h) {
+              captureFrame6();
+              usingCapture = true;
+              p8state = 2; p8timer = 0;
+            }
+          } else if (p8state === 2) {
+            p8timer++;
+            if (p8timer >= 30) {
+              resetCycle1();
+              f6Count2 = 0;
+              for (let i = 0; i < cols*rows; i++) f6Used[i] = false;
+              slideY = -imgH;
+              phase = 0;
+            }
+          }
+        }
+
+        /* Draw frame borders */
+        p.stroke(28,28,90); p.strokeWeight(2.0); p.noFill();
+        p.rect(r1x,r1y,r1w,r1h);
+        p.rect(r2x,r2y,r2w,r2h);
+        p.rect(r3x,r3y,r3w,r3h);
+        p.rect(r4x,r4y,r4w,r4h);
+        if (phase !== 6) p.rect(r5x,r5y,r5w,r5h);
+        p.rect(r6x,r6y,r6w,r6h);
+
+        p.pop();
+      };
+
+      p.windowResized = () => {
+        const rect = container.getBoundingClientRect();
+        viewW = Math.max(1, Math.floor(rect.width));
+        viewH = Math.max(1, Math.floor(rect.height));
+        p.resizeCanvas(viewW, viewH);
+      };
+    };
+
+    new p5(sketch);
+
+    /* ===== Upload / Camera / Delete UI ===== */
+    const pick = document.getElementById("pick");
+    const camBtn = document.getElementById("camBtn");
+    const snapBtn = document.getElementById("snapBtn");
+    const vid = document.getElementById("vid");
+    const uMsg = document.getElementById("uMsg");
+
+    let stream = null;
+
+    function setMsg(t) {
+      uMsg.textContent = t || "";
+    }
+
+    async function uploadBlob(blob, filename = "capture.jpg") {
+      const fd = new FormData();
+      fd.append("photo", blob, filename);
+
+      setMsg("Uploading...");
+      const r = await fetch("api/upload.php", { method: "POST", body: fd });
+
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        throw new Error(`HTTP ${r.status}${text ? " — " + text : ""}`);
+      }
+
+      const data = await r.json().catch(() => ({}));
+
+      setMsg("Uploaded.");
+      await fetchImages();
+      return data;
+    }
+
+    async function fileToUploadBlob(file) {
+      const type = (file.type || "").toLowerCase();
+      const name = (file.name || "").toLowerCase();
+      const isHeic = type.includes("heic") || type.includes("heif") || name.endsWith(".heic") || name.endsWith(".heif");
+
+      if (!isHeic) return file;
+
+      setMsg("Converting HEIC...");
+      const out = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.92 });
+      return Array.isArray(out) ? out[0] : out;
+    }
+
+    pick.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const blob = await fileToUploadBlob(file);
+        const ext = blob.type === "image/png" ? ".png" : ".jpg";
+        await uploadBlob(blob, "upload" + ext);
+      } catch (err) {
+        console.error(err);
+        setMsg("Upload failed: " + err.message);
+      } finally {
+        pick.value = "";
+      }
+    });
+
+    camBtn.addEventListener("click", async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false
+        });
+        vid.srcObject = stream;
+        await vid.play();
+        vid.style.display = "block";
+        snapBtn.style.display = "block";
+        setMsg("Camera ready.");
+      } catch (err) {
+        console.error(err);
+        setMsg("Camera failed: " + err.message);
+      }
+    });
+
+    snapBtn.addEventListener("click", async () => {
+      try {
+        if (!vid.videoWidth || !vid.videoHeight) throw new Error("No camera frame available");
+
+        const c = document.createElement("canvas");
+        c.width = vid.videoWidth;
+        c.height = vid.videoHeight;
+        const ctx = c.getContext("2d");
+        ctx.drawImage(vid, 0, 0);
+
+        const blob = await new Promise((resolve) => c.toBlob(resolve, "image/jpeg", 0.92));
+        if (!blob) throw new Error("Could not create image blob");
+
+        await uploadBlob(blob, "camera.jpg");
+      } catch (err) {
+        console.error(err);
+        setMsg("Capture failed: " + err.message);
+      }
+    });
+
+    const delAllBtn = document.getElementById("delAllBtn");
+
+    delAllBtn.addEventListener("click", async () => {
+      if (!confirm("Delete ALL uploaded pictures? This cannot be undone.")) return;
+
+      try {
+        setMsg("Deleting...");
+
+        const r = await fetch("api/delete_all.php", { method: "POST" });
+
+        if (!r.ok) {
+          const text = await r.text().catch(() => "");
+          throw new Error(`HTTP ${r.status}${text ? " — " + text : ""}`);
+        }
+
+        const data = await r.json().catch(() => ({}));
+
+        setMsg(`Deleted ${data.deleted ?? 0} file(s).`);
+
+        latestServerUrl = null;
+        if (sketchApi) sketchApi.setServerImage(null);
+
+        await fetchImages();
+      } catch (e) {
+        console.error(e);
+        setMsg("Delete failed: " + e.message);
+      }
+    });
+  </script>
+</body>
+</html>

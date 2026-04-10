@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Upload</title>
+  <style>
+    html, body { height:100%; margin:0; font-family:system-ui,sans-serif; }
+    .wrap { height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:16px; }
+    .msg { font-size:14px; opacity:.85; text-align:center; max-width: 420px; word-break: break-word; }
+    input { font-size:16px; }
+    button { font-size:16px; padding:10px 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <input id="file" type="file" accept="image/*" capture="environment">
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <!-- HEIC -> JPEG converter -->
+  <script src="https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js"></script>
+
+  <script>
+    const fileEl = document.getElementById("file");
+    const msgEl = document.getElementById("msg");
+
+    function setMsg(s) { msgEl.textContent = s; }
+
+    async function maybeConvertHeicToJpeg(file) {
+      const name = (file.name || "").toLowerCase();
+      const isHeic = file.type === "image/heic" || file.type === "image/heif" || name.endsWith(".heic") || name.endsWith(".heif");
+      if (!isHeic) return file;
+
+      setMsg("Converting HEIC to JPEG…");
+
+      // heic2any returns a Blob (or Array of Blobs). We force jpeg output.
+      const out = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.9 });
+      const blob = Array.isArray(out) ? out[0] : out;
+      return new File([blob], (file.name || "photo").replace(/\.(heic|heif)$/i, ".jpg"), { type: "image/jpeg" });
+    }
+
+    async function uploadFile(file) {
+      const fd = new FormData();
+      fd.append("photo", file); // server expects field name "photo"
+
+      const r = await fetch("api/upload.php", { method: "POST", body: fd });
+
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        throw new Error(`HTTP ${r.status} ${r.statusText}${text ? " — " + text : ""}`);
+      }
+    }
+
+    fileEl.addEventListener("change", async () => {
+      const file = fileEl.files?.[0];
+      if (!file) return;
+
+      setMsg("Preparing upload…");
+
+      try {
+        const safeFile = await maybeConvertHeicToJpeg(file);
+        setMsg("Uploading…");
+        await uploadFile(safeFile);
+        setMsg("Uploaded! You can take another photo.");
+        fileEl.value = "";
+      } catch (e) {
+        console.error(e);
+        setMsg("Upload failed: " + e.message);
+      }
+    });
+  </script>
+</body>
+</html>
