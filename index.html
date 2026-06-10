@@ -1,0 +1,1771 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>Ceļojošās bildes</title>
+  <script src="https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js"></script>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html, body { height:100%; background:#000000; overflow:hidden;
+      -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
+      font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    #sketch { position:absolute; inset:0; }
+    canvas { display:block; }
+
+    .btn {
+      appearance:none; border:0; cursor:pointer;
+      font-size:clamp(16px,4.4vw,19px); font-weight:600;
+      color:#000; background:#f2efe6;
+      padding:16px 28px; border-radius:999px;
+      box-shadow:0 6px 22px rgba(0,0,0,.45);
+      transition:transform .08s ease;
+    }
+    .btn:active { transform:translateY(1px) scale(.99); }
+
+    #intro {
+      position:fixed; inset:0; z-index:10;
+      display:flex; background:#000;
+    }
+    .introInner { margin:auto; display:flex; flex-direction:column; align-items:center; gap:20px; padding:30px 24px; }
+    .orline { font-size:13px; color:#888; letter-spacing:.14em; text-transform:uppercase; }
+
+    #fab {
+      position:fixed; z-index:9; left:50%; transform:translateX(-50%);
+      bottom:calc(18px + env(safe-area-inset-bottom)); display:none;
+      padding:13px 22px; font-size:15px; opacity:.92;
+    }
+
+    #status { position:fixed; z-index:11; left:50%; transform:translateX(-50%);
+      top:calc(16px + env(safe-area-inset-top)); display:none; }
+    #status.err { font-size:13px; color:#000; background:#f2efe6; padding:7px 14px; border-radius:999px; }
+    .spin { width:30px; height:30px; border:3px solid rgba(242,239,230,.25); border-top-color:#f2efe6;
+      border-radius:50%; display:inline-block; animation:r .8s linear infinite; }
+    @keyframes r { to { transform:rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="sketch"></div>
+
+  <div id="status"></div>
+
+  <div id="intro">
+    <div class="introInner">
+      <button class="btn" id="fileBtn">Izvēlies failu</button>
+      <div class="orline">vai</div>
+      <button class="btn" id="camBtn">uzņem bildi</button>
+    </div>
+  </div>
+
+  <button class="btn" id="fab">jauns foto</button>
+
+  <input id="pickFile" type="file" accept="image/*" style="display:none" />
+  <input id="pickCam"  type="file" accept="image/*" capture="environment" style="display:none" />
+
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.3/lib/p5.min.js"></script>
+
+  <script>
+    /* Version 2026-05-15 — per-cell mapping support (r1 cells + shrunken, r6 columns) */
+    console.log("[boot] index.html v2026-05-15+cellmap");
+
+    /* ===== Local image source (no server) ===== */
+    let sketchApi = null;
+    const imageQueue = [];   // kept empty — local uploads are fed straight into the sketch
+
+    /* ===================================================================
+       p5.js sketch (instance mode)
+       =================================================================== */
+    const sketch = (p) => {
+      const container = document.getElementById("sketch");
+      const DESIGN_W = 1100, DESIGN_H = 660;
+
+      /* --- Logical constants (DO NOT change with mapping) ---
+         These define the source layout in lastFrame: a 3×5 grid of cells,
+         each LOGICAL_CELL pixels per side (at logical scale, ×QS for source). */
+      const cols = 3, rows = 5, totalCells = 15;
+      const LOGICAL_CELL = 68;
+      const LOGICAL_R1_W = 204;   // = cols * LOGICAL_CELL
+      const LOGICAL_R1_H = 340;   // = rows * LOGICAL_CELL
+      const QS = 2;
+      const cell = LOGICAL_CELL;  // alias kept for source-coord math
+
+      const speed = 0.003, maxBlur = 8/7, blurSteps = 15;
+
+      /* --- Mapped display geometry (overridden by mapping.html) ---
+         r1cells[i]  — 15 cell rects in r1 ({x,y,w,h}, i = cy*cols+cx)
+         r1shrunk[i] — 15 shrunken rects (target during phase-1 shrink animation)
+         r6cols[i]   — 3 column rects for r6 (cells stack 5-deep within each)
+         r2, r3, r4, r5, r7 — single rects unchanged
+         r1x/y/w/h and r6x/y/w/h are derived as bounding boxes (for clears) */
+      let r1cells = [];
+      let r1shrunk = [];
+      let r6cols = [];
+      let r1x, r1y, r1w, r1h;
+      let r6x, r6y, r6w, r6h;
+      let r6mid=[]; // 15 mapped mid cell rects
+      let r6top=[]; // 3 mapped top band cells
+      let r6bot=[]; // 3 mapped bottom band cells
+      let R6_MID_FRAC = 3.0/5.0; // mid-grid height as fraction of full r6 height (computed from mapping)
+      let r3x=312, r3y=198, r3w=7*LOGICAL_CELL, r3h=LOGICAL_CELL;
+      let r3parts=[]; // 21 mapped part rects for r3
+      let r2x=312, r2y=296, r2w=LOGICAL_CELL,   r2h=LOGICAL_CELL;
+      let r7x=-1,  r7y=296, r7w=LOGICAL_CELL,   r7h=LOGICAL_CELL;
+      let r7ax=-1, r7ay=296, r7aw=0, r7ah=LOGICAL_CELL;
+      let r7bx=-1, r7by=296, r7bw=0, r7bh=LOGICAL_CELL;
+      let r5x=-1,  r5y=296, r5w=LOGICAL_CELL,   r5h=LOGICAL_CELL;
+      let r5rx=-1, r5ry=296, r5rw=LOGICAL_CELL,  r5rh=LOGICAL_CELL;
+      let r5rPts=null; // quad corner points for diamond clipping
+      let r7aPts=null, r7bPts=null; // quad corner points for darkest segment
+      let r4x=312, r4y=394, r4w=7*LOGICAL_CELL, r4h=LOGICAL_CELL;
+      let r4parts=[]; // 21 mapped part rects for r4
+
+      function defaultR1Cells() {
+        const out = [];
+        for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+          out.push({ x: 58 + cx*LOGICAL_CELL, y: 24 + cy*LOGICAL_CELL,
+                     w: LOGICAL_CELL, h: LOGICAL_CELL });
+        }
+        return out;
+      }
+      function defaultR1Shrunk() {
+        const out = [];
+        const sw = LOGICAL_CELL * 0.5, off = LOGICAL_CELL * 0.25;
+        for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+          out.push({ x: 58 + cx*LOGICAL_CELL + off, y: 24 + cy*LOGICAL_CELL + off,
+                     w: sw, h: sw });
+        }
+        return out;
+      }
+      function defaultR6Cols() {
+        return [
+          { x: 838,                y: 296, w: LOGICAL_CELL, h: 340 },
+          { x: 838 + LOGICAL_CELL, y: 296, w: LOGICAL_CELL, h: 340 },
+          { x: 838 + LOGICAL_CELL*2, y: 296, w: LOGICAL_CELL, h: 340 },
+        ];
+      }
+
+      r1cells = defaultR1Cells();
+      r1shrunk = defaultR1Shrunk();
+      r6cols = defaultR6Cols();
+
+      function computeBounds() {
+        // r1 bbox
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const c of r1cells) {
+          if (c.x < minX) minX = c.x;
+          if (c.y < minY) minY = c.y;
+          if (c.x + c.w > maxX) maxX = c.x + c.w;
+          if (c.y + c.h > maxY) maxY = c.y + c.h;
+        }
+        for (const c of r1shrunk) {
+          if (c.x < minX) minX = c.x;
+          if (c.y < minY) minY = c.y;
+          if (c.x + c.w > maxX) maxX = c.x + c.w;
+          if (c.y + c.h > maxY) maxY = c.y + c.h;
+        }
+        r1x = minX; r1y = minY; r1w = maxX - minX; r1h = maxY - minY;
+        // r6 bbox
+        minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
+        for (const c of r6cols) {
+          if (c.x < minX) minX = c.x;
+          if (c.y < minY) minY = c.y;
+          if (c.x + c.w > maxX) maxX = c.x + c.w;
+          if (c.y + c.h > maxY) maxY = c.y + c.h;
+        }
+        r6x = minX; r6y = minY; r6w = maxX - minX; r6h = maxY - minY;
+      }
+
+      /* ---- Apply projection mapping ----
+         EMBEDDED_MAPPING below is SEEDED into localStorage once (gated by
+         EMBEDDED_MAPPING_VERSION). After that, the projection reads from localStorage like
+         normal, so the mapping editor (mapping.html) shows this mapping AND any further
+         edits you make there flow straight back to the projection. To push a brand-new
+         embedded mapping later, replace the object AND bump EMBEDDED_MAPPING_VERSION. */
+      const EMBEDDED_MAPPING_VERSION = 'v1';
+      const EMBEDDED_MAPPING = {"r1cells":[{"x":82,"y":19,"w":67,"h":68,"pts":[{"x":83,"y":20},{"x":149,"y":19},{"x":149,"y":87},{"x":82,"y":87}]},{"x":148,"y":19,"w":68,"h":68,"pts":[{"x":148,"y":19},{"x":216,"y":19},{"x":216,"y":87},{"x":148,"y":87}]},{"x":216,"y":19,"w":68,"h":68,"pts":[{"x":216,"y":19},{"x":284,"y":19},{"x":284,"y":87},{"x":216,"y":87}]},{"x":82,"y":87,"w":67,"h":68,"pts":[{"x":83,"y":87},{"x":149,"y":87},{"x":149,"y":155},{"x":82,"y":154}]},{"x":148,"y":87,"w":68,"h":68,"pts":[{"x":148,"y":87},{"x":216,"y":87},{"x":216,"y":155},{"x":148,"y":155}]},{"x":216,"y":87,"w":68,"h":68,"pts":[{"x":216,"y":87},{"x":284,"y":87},{"x":284,"y":155},{"x":216,"y":155}]},{"x":81,"y":155,"w":67,"h":68,"pts":[{"x":82,"y":155},{"x":148,"y":155},{"x":148,"y":223},{"x":81,"y":223}]},{"x":148,"y":155,"w":68,"h":68,"pts":[{"x":148,"y":155},{"x":216,"y":155},{"x":216,"y":223},{"x":148,"y":223}]},{"x":216,"y":155,"w":68,"h":68,"pts":[{"x":216,"y":155},{"x":284,"y":155},{"x":284,"y":223},{"x":216,"y":223}]},{"x":81,"y":223,"w":67,"h":68,"pts":[{"x":81,"y":223},{"x":148,"y":223},{"x":148,"y":291},{"x":81,"y":291}]},{"x":148,"y":223,"w":68,"h":68,"pts":[{"x":148,"y":223},{"x":216,"y":223},{"x":216,"y":291},{"x":148,"y":291}]},{"x":215,"y":223,"w":69,"h":69,"pts":[{"x":216,"y":223},{"x":284,"y":223},{"x":284,"y":291},{"x":215,"y":292}]},{"x":80,"y":290,"w":67,"h":69,"pts":[{"x":80,"y":290},{"x":147,"y":290},{"x":147,"y":358},{"x":80,"y":359}]},{"x":147,"y":290,"w":68,"h":68,"pts":[{"x":147,"y":290},{"x":215,"y":290},{"x":215,"y":358},{"x":147,"y":358}]},{"x":215,"y":290,"w":68,"h":68,"pts":[{"x":215,"y":290},{"x":283,"y":290},{"x":283,"y":358},{"x":215,"y":358}]}],"r1shrunk":[{"x":84,"y":18,"w":32,"h":31,"pts":[{"x":84,"y":19},{"x":116,"y":18},{"x":116,"y":49},{"x":84,"y":49}]},{"x":152,"y":18,"w":34,"h":34,"pts":[{"x":152,"y":18},{"x":186,"y":18},{"x":186,"y":52},{"x":152,"y":52}]},{"x":233,"y":36,"w":34,"h":34,"pts":[{"x":233,"y":36},{"x":267,"y":36},{"x":267,"y":70},{"x":233,"y":70}]},{"x":82,"y":88,"w":33,"h":30,"pts":[{"x":82,"y":88},{"x":115,"y":88},{"x":115,"y":118},{"x":82,"y":118}]},{"x":152,"y":87,"w":33,"h":32,"pts":[{"x":152,"y":87},{"x":185,"y":87},{"x":184,"y":119},{"x":152,"y":119}]},{"x":221,"y":86,"w":34,"h":32,"pts":[{"x":221,"y":86},{"x":254,"y":86},{"x":255,"y":118},{"x":221,"y":117}]},{"x":82,"y":157,"w":32,"h":32,"pts":[{"x":82,"y":157},{"x":114,"y":157},{"x":114,"y":188},{"x":82,"y":189}]},{"x":150,"y":157,"w":34,"h":32,"pts":[{"x":150,"y":157},{"x":184,"y":157},{"x":183,"y":188},{"x":150,"y":189}]},{"x":222,"y":156,"w":33,"h":32,"pts":[{"x":222,"y":156},{"x":255,"y":156},{"x":254,"y":188},{"x":222,"y":188}]},{"x":82,"y":228,"w":32,"h":32,"pts":[{"x":82,"y":228},{"x":114,"y":228},{"x":113,"y":260},{"x":82,"y":260}]},{"x":150,"y":226,"w":33,"h":33,"pts":[{"x":150,"y":226},{"x":183,"y":226},{"x":183,"y":259},{"x":150,"y":259}]},{"x":221,"y":226,"w":32,"h":33,"pts":[{"x":221,"y":226},{"x":253,"y":226},{"x":253,"y":259},{"x":221,"y":259}]},{"x":81,"y":297,"w":32,"h":33,"pts":[{"x":81,"y":297},{"x":113,"y":297},{"x":113,"y":330},{"x":81,"y":330}]},{"x":150,"y":297,"w":33,"h":33,"pts":[{"x":150,"y":297},{"x":183,"y":297},{"x":183,"y":330},{"x":150,"y":330}]},{"x":219,"y":294,"w":34,"h":34,"pts":[{"x":221,"y":296},{"x":253,"y":294},{"x":253,"y":328},{"x":219,"y":328}]}],"r3parts":[{"x":326,"y":183,"w":20,"h":78,"pts":[{"x":326,"y":184},{"x":346,"y":183},{"x":346,"y":260},{"x":331,"y":261}]},{"x":348,"y":194,"w":23,"h":57,"pts":[{"x":352,"y":194},{"x":371,"y":194},{"x":369,"y":251},{"x":348,"y":250}]},{"x":372,"y":184,"w":22,"h":75,"pts":[{"x":372,"y":185},{"x":394,"y":184},{"x":394,"y":258},{"x":374,"y":259}]},{"x":395,"y":192,"w":24,"h":59,"pts":[{"x":399,"y":192},{"x":419,"y":192},{"x":418,"y":251},{"x":395,"y":251}]},{"x":420,"y":183,"w":22,"h":75,"pts":[{"x":420,"y":184},{"x":442,"y":183},{"x":442,"y":258},{"x":421,"y":257}]},{"x":443,"y":191,"w":23,"h":57,"pts":[{"x":445,"y":192},{"x":466,"y":191},{"x":466,"y":248},{"x":443,"y":248}]},{"x":467,"y":182,"w":22,"h":75,"pts":[{"x":467,"y":182},{"x":488,"y":182},{"x":489,"y":256},{"x":470,"y":257}]},{"x":491,"y":189,"w":22,"h":59,"pts":[{"x":492,"y":189},{"x":513,"y":190},{"x":512,"y":248},{"x":491,"y":248}]},{"x":516,"y":182,"w":22,"h":75,"pts":[{"x":516,"y":182},{"x":537,"y":182},{"x":538,"y":256},{"x":517,"y":257}]},{"x":539,"y":190,"w":23,"h":58,"pts":[{"x":539,"y":190},{"x":561,"y":190},{"x":562,"y":248},{"x":541,"y":247}]},{"x":562,"y":180,"w":23,"h":77,"pts":[{"x":562,"y":180},{"x":584,"y":180},{"x":585,"y":255},{"x":564,"y":257}]},{"x":586,"y":188,"w":24,"h":59,"pts":[{"x":586,"y":190},{"x":609,"y":188},{"x":610,"y":247},{"x":588,"y":247}]},{"x":611,"y":183,"w":21,"h":73,"pts":[{"x":611,"y":183},{"x":632,"y":183},{"x":632,"y":255},{"x":611,"y":256}]},{"x":634,"y":188,"w":23,"h":58,"pts":[{"x":634,"y":189},{"x":656,"y":188},{"x":657,"y":246},{"x":635,"y":246}]},{"x":659,"y":180,"w":22,"h":75,"pts":[{"x":659,"y":180},{"x":681,"y":180},{"x":680,"y":255},{"x":659,"y":255}]},{"x":684,"y":188,"w":23,"h":57,"pts":[{"x":684,"y":189},{"x":704,"y":188},{"x":707,"y":245},{"x":684,"y":245}]},{"x":707,"y":179,"w":22,"h":75,"pts":[{"x":707,"y":179},{"x":729,"y":179},{"x":729,"y":253},{"x":707,"y":254}]},{"x":730,"y":187,"w":24,"h":58,"pts":[{"x":730,"y":189},{"x":750,"y":187},{"x":754,"y":245},{"x":731,"y":245}]},{"x":754,"y":181,"w":24,"h":73,"pts":[{"x":754,"y":181},{"x":778,"y":182},{"x":776,"y":253},{"x":754,"y":254}]},{"x":778,"y":186,"w":24,"h":56,"pts":[{"x":778,"y":186},{"x":799,"y":186},{"x":802,"y":242},{"x":781,"y":242}]},{"x":803,"y":176,"w":24,"h":77,"pts":[{"x":805,"y":176},{"x":827,"y":176},{"x":822,"y":253},{"x":803,"y":252}]}],"r4parts":[{"x":323,"y":387,"w":24,"h":64,"pts":[{"x":330,"y":387},{"x":347,"y":387},{"x":345,"y":451},{"x":323,"y":451}]},{"x":348,"y":382,"w":23,"h":73,"pts":[{"x":348,"y":382},{"x":370,"y":382},{"x":371,"y":454},{"x":352,"y":455}]},{"x":371,"y":387,"w":24,"h":64,"pts":[{"x":374,"y":387},{"x":395,"y":387},{"x":393,"y":451},{"x":371,"y":451}]},{"x":396,"y":382,"w":23,"h":72,"pts":[{"x":396,"y":382},{"x":418,"y":382},{"x":419,"y":454},{"x":397,"y":454}]},{"x":418,"y":386,"w":24,"h":64,"pts":[{"x":418,"y":387},{"x":442,"y":386},{"x":441,"y":449},{"x":419,"y":450}]},{"x":444,"y":380,"w":23,"h":73,"pts":[{"x":444,"y":380},{"x":466,"y":380},{"x":467,"y":452},{"x":446,"y":453}]},{"x":467,"y":387,"w":23,"h":64,"pts":[{"x":469,"y":387},{"x":490,"y":388},{"x":489,"y":451},{"x":467,"y":450}]},{"x":492,"y":380,"w":22,"h":73,"pts":[{"x":492,"y":381},{"x":513,"y":380},{"x":514,"y":453},{"x":493,"y":453}]},{"x":514,"y":385,"w":24,"h":64,"pts":[{"x":514,"y":385},{"x":538,"y":386},{"x":537,"y":449},{"x":516,"y":448}]},{"x":539,"y":381,"w":22,"h":72,"pts":[{"x":539,"y":381},{"x":561,"y":381},{"x":561,"y":453},{"x":540,"y":453}]},{"x":563,"y":385,"w":22,"h":64,"pts":[{"x":564,"y":385},{"x":585,"y":385},{"x":585,"y":449},{"x":563,"y":448}]},{"x":586,"y":381,"w":24,"h":72,"pts":[{"x":588,"y":381},{"x":610,"y":381},{"x":609,"y":453},{"x":586,"y":451}]},{"x":611,"y":385,"w":24,"h":63,"pts":[{"x":611,"y":386},{"x":633,"y":385},{"x":635,"y":448},{"x":612,"y":448}]},{"x":636,"y":379,"w":22,"h":73,"pts":[{"x":636,"y":379},{"x":658,"y":380},{"x":656,"y":452},{"x":636,"y":452}]},{"x":659,"y":384,"w":23,"h":64,"pts":[{"x":659,"y":386},{"x":680,"y":384},{"x":682,"y":448},{"x":660,"y":448}]},{"x":683,"y":378,"w":22,"h":73,"pts":[{"x":683,"y":378},{"x":705,"y":378},{"x":705,"y":450},{"x":684,"y":451}]},{"x":706,"y":383,"w":25,"h":64,"pts":[{"x":706,"y":383},{"x":728,"y":383},{"x":731,"y":447},{"x":708,"y":447}]},{"x":732,"y":377,"w":22,"h":73,"pts":[{"x":733,"y":377},{"x":754,"y":377},{"x":753,"y":450},{"x":732,"y":450}]},{"x":755,"y":382,"w":24,"h":64,"pts":[{"x":755,"y":383},{"x":775,"y":382},{"x":779,"y":446},{"x":756,"y":446}]},{"x":780,"y":378,"w":23,"h":72,"pts":[{"x":780,"y":378},{"x":803,"y":378},{"x":800,"y":450},{"x":780,"y":450}]},{"x":803,"y":382,"w":25,"h":63,"pts":[{"x":803,"y":382},{"x":823,"y":382},{"x":828,"y":444},{"x":806,"y":445}]}],"r6cols":[{"x":878,"y":272,"w":216,"h":64,"pts":[{"x":878,"y":272},{"x":1094,"y":272},{"x":1094,"y":336},{"x":878,"y":336}]},{"x":874,"y":340,"w":217,"h":216},{"x":881,"y":556,"w":216,"h":66,"pts":[{"x":881,"y":556},{"x":1097,"y":556},{"x":1097,"y":622},{"x":881,"y":622}]}],"r6mid":[{"x":874,"y":342,"w":72,"h":41},{"x":947,"y":341,"w":70,"h":42},{"x":1018,"y":340,"w":70,"h":43},{"x":874,"y":385,"w":72,"h":41},{"x":946,"y":384,"w":72,"h":41},{"x":1018,"y":384,"w":71,"h":42},{"x":875,"y":428,"w":72,"h":41},{"x":947,"y":428,"w":72,"h":41},{"x":1019,"y":426,"w":70,"h":43},{"x":876,"y":470,"w":70,"h":43},{"x":948,"y":470,"w":72,"h":43},{"x":1019,"y":470,"w":71,"h":42},{"x":875,"y":514,"w":72,"h":42},{"x":947,"y":513,"w":73,"h":42},{"x":1020,"y":514,"w":71,"h":41}],"r3":{"x":326,"y":176,"w":501,"h":85},"r4":{"x":323,"y":377,"w":505,"h":78},"r2":{"x":328,"y":291,"w":68,"h":66,"pts":[{"x":328,"y":292},{"x":396,"y":291},{"x":396,"y":356},{"x":328,"y":357}]},"r5":{"x":756,"y":280,"w":69,"h":69,"pts":[{"x":756,"y":281},{"x":825,"y":280},{"x":825,"y":347},{"x":756,"y":349}]},"r5r":{"x":742,"y":265,"w":96,"h":96,"pts":[{"x":790,"y":265},{"x":838,"y":313},{"x":791,"y":361},{"x":742,"y":314}]},"r7a":{"x":427,"y":285,"w":48,"h":71,"pts":[{"x":427,"y":289},{"x":475,"y":285},{"x":475,"y":353},{"x":427,"y":356}]},"r7b":{"x":476,"y":285,"w":19,"h":71,"pts":[{"x":477,"y":285},{"x":495,"y":290},{"x":494,"y":356},{"x":476,"y":353}]},"r7":{"x":427,"y":285,"w":68,"h":71}}; /* hard-coded projection mapping (seeded into localStorage once) */
+      try {
+        // Seed localStorage from the embedded mapping ONCE (so the editor shows it too).
+        if (EMBEDDED_MAPPING && typeof EMBEDDED_MAPPING === 'object') {
+          try {
+            if (localStorage.getItem('projectionMappingSeed') !== EMBEDDED_MAPPING_VERSION) {
+              localStorage.setItem('projectionMapping', JSON.stringify(EMBEDDED_MAPPING));
+              localStorage.setItem('projectionMappingSeed', EMBEDDED_MAPPING_VERSION);
+              console.log('[mapping] seeded localStorage from EMBEDDED_MAPPING', EMBEDDED_MAPPING_VERSION);
+            }
+          } catch(seedErr) { console.warn('[mapping] seed failed:', seedErr); }
+        }
+        let M = null;
+        const raw = localStorage.getItem('projectionMapping');
+        if (raw) M = JSON.parse(raw);
+        else if (EMBEDDED_MAPPING) M = EMBEDDED_MAPPING;  // fallback if storage unavailable
+        if (M) {
+          if (Array.isArray(M.r1cells)) {
+            for (let i = 0; i < 15 && i < M.r1cells.length; i++)
+              if (M.r1cells[i]) r1cells[i] = { ...M.r1cells[i] };
+          } else if (M.r1) {
+            // Old single-rect format: expand into 15 grid cells
+            const cw = M.r1.w / cols, ch = M.r1.h / rows;
+            for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+              r1cells[cy*cols+cx] = {
+                x: M.r1.x + cx*cw, y: M.r1.y + cy*ch, w: cw, h: ch
+              };
+            }
+          }
+          if (Array.isArray(M.r1shrunk)) {
+            for (let i = 0; i < 15 && i < M.r1shrunk.length; i++)
+              if (M.r1shrunk[i]) r1shrunk[i] = { ...M.r1shrunk[i] };
+          }
+          if (Array.isArray(M.r6cols)) {
+            for (let i = 0; i < 3 && i < M.r6cols.length; i++)
+              if (M.r6cols[i]) r6cols[i] = { ...M.r6cols[i] };
+          } else if (M.r6) {
+            // Old single-rect format
+            const cw = M.r6.w / cols;
+            for (let i = 0; i < cols; i++) {
+              r6cols[i] = { x: M.r6.x + i*cw, y: M.r6.y, w: cw, h: M.r6.h };
+            }
+          }
+          if (Array.isArray(M.r6mid)) r6mid=M.r6mid.map(p=>({x:p.x,y:p.y,w:p.w,h:p.h}));
+          if (Array.isArray(M.r6top)) r6top=M.r6top.map(p=>({x:p.x,y:p.y,w:p.w,h:p.h}));
+          if (Array.isArray(M.r6bot)) r6bot=M.r6bot.map(p=>({x:p.x,y:p.y,w:p.w,h:p.h}));
+          if (M.r3) { r3x=M.r3.x; r3y=M.r3.y; r3w=M.r3.w; r3h=M.r3.h; }
+          if (Array.isArray(M.r3parts)) r3parts=M.r3parts.map(p=>({x:p.x,y:p.y,w:p.w,h:p.h,pts:p.pts||null}));
+          if (M.r2) { r2x=M.r2.x; r2y=M.r2.y; r2w=M.r2.w; r2h=M.r2.h; }
+          if (M.r7) { r7x=M.r7.x; r7y=M.r7.y; r7w=M.r7.w; r7h=M.r7.h; }
+          if (M.r7a) { r7ax=M.r7a.x; r7ay=M.r7a.y; r7aw=M.r7a.w; r7ah=M.r7a.h; r7aPts=M.r7a.pts||null; }
+          if (M.r7b) { r7bx=M.r7b.x; r7by=M.r7b.y; r7bw=M.r7b.w; r7bh=M.r7b.h; r7bPts=M.r7b.pts||null; }
+          if (M.r5) { r5x=M.r5.x; r5y=M.r5.y; r5w=M.r5.w; r5h=M.r5.h; }
+          if (M.r5r) { r5rx=M.r5r.x; r5ry=M.r5r.y; r5rw=M.r5r.w; r5rh=M.r5r.h; if(M.r5r.pts) r5rPts=M.r5r.pts; }
+          if (M.r4) { r4x=M.r4.x; r4y=M.r4.y; r4w=M.r4.w; r4h=M.r4.h; }
+          if (Array.isArray(M.r4parts)) r4parts=M.r4parts.map(p=>({x:p.x,y:p.y,w:p.w,h:p.h,pts:p.pts||null}));
+          console.log('[mapping] applied | keys:', Object.keys(M));
+        } else {
+          console.log('[mapping] none found, using defaults');
+        }
+      } catch(e) {
+        console.warn('[mapping] load error:', e);
+      }
+      computeBounds();
+      computeR6MidFrac();
+      // Default r3/r4 parts (21 equal vertical strips) if not loaded from mapping
+      if(r3parts.length===0){const pw=r3w/21;for(let i=0;i<21;i++)r3parts.push({x:r3x+i*pw,y:r3y,w:pw,h:r3h});}
+      if(r4parts.length===0){const pw=r4w/21;for(let i=0;i<21;i++)r4parts.push({x:r4x+i*pw,y:r4y,w:pw,h:r4h});}
+
+      window.addEventListener('storage', (e) => {
+        if (e.key === 'projectionMapping') {
+          console.log('[mapping] storage event — reloading page');
+          location.reload();
+        }
+      });
+
+      /* --- state --- */
+      let viewW=1, viewH=1;
+      let img=null, fullImg=null, lastFrame=null;
+      let imgW, imgH, slideY, stopAt;
+      let phase=-1;
+      let slideT=0, fallT=0, moveT=0, shiftT=0;
+      let blurredFrames=null;
+      let avgDarkness=-1, cellCategory=null;
+      let iteration=0, colDrops=[0,0,0];
+      let colScreenX, colShiftFrom, colShiftTo;  // absolute column positions
+      let colHome=[0,1,2], colHomePrev=[0,1,2];  // mapped column-slot each column occupies
+      let curCX=2, curCY=4;
+      let lightCount=0, darkCount=0;
+      let lightSlots, darkSlots;
+      let isDarkest=false, colShiftActive=false;
+
+      let cycleOrder=null, cycleIter=0;
+      let f3Exited=0, f4Exited=0;
+      let stepShiftT=0, stepShiftActive=false;
+      let exitOrigCX=-1, exitOrigCY=-1, exitCellImg=null;
+      let outSlideT=0, toF6T=0, phase4timer=0;
+
+      let rotDeg=0, rotAngle=0, rotDirection=1, ROT_DEG_PER_FRAME;
+
+      let f6Count2=0, f6Data=[], f6Used=[];
+
+      let capturedF6=null, usingCapture=false;
+      let f6FullCapture=null;
+      let darkestCellImg=null, darkestVisible=false, darkestAlpha=255;
+
+      let p0state=0, p0timer=0;
+      let p1state=0, p1timer=0;
+      let captureSmallH=0, expandT=0;
+      let blurChunkIdx=0;
+      let blurSrcCanvas=null, blurDstCanvas=null, blurPad=0;
+      let canvasFilterWorks=null;
+      let cpuHalfImg=null;
+      let blurStartTime=0;
+
+      let sortSpeedMult=1.0, cycleSpeedMult=1.0;
+      let p8state=0, p8timer=0, squishT=0, f6SlideX=0;
+
+      let imageReady=false;
+      let loadInProgress=false;
+      let currentLoadToken=0;
+      let showFrames=false;  // toggled with S key
+
+      function cacheBust(url) {
+        return url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+      }
+
+      function initArrays() {
+        lightSlots = Array.from({length:7}, ()=>[0,0]);
+        darkSlots  = Array.from({length:7}, ()=>[0,0]);
+        f6Data     = Array.from({length:14},()=>[0,0,0,0]);
+        f6Used     = new Array(cols*rows).fill(false);
+      }
+
+      function initFromImage() {
+        if (!img) return;
+        fullImg = p.createGraphics(LOGICAL_R1_W * QS, LOGICAL_R1_H * QS);
+        let sc = Math.max(LOGICAL_R1_W / img.width, LOGICAL_R1_H / img.height);
+        imgW = img.width  * sc;
+        imgH = img.height * sc;
+        slideY = -imgH;
+        stopAt = Math.max(0, LOGICAL_R1_H - imgH);
+        colScreenX   = [r1cells[0].x, r1cells[1].x, r1cells[2].x];
+        colShiftFrom = colScreenX.slice();
+        colShiftTo   = colScreenX.slice();
+        resetCycle1();
+        f6Count2 = 0;
+        for (let i=0;i<cols*rows;i++) f6Used[i]=false;
+        darkestCellImg=null; darkestVisible=false; darkestAlpha=255;
+        f6FullCapture=null; capturedF6=null; usingCapture=false;
+        slideT=0; p0state=0; p0timer=0; p1state=0; p1timer=0; expandT=0;
+        phase = 0;
+        imageReady = true;
+      }
+
+      function renderToFullImg() {
+        fullImg.background(0,0,0);
+        if (usingCapture && capturedF6) {
+          fullImg.image(capturedF6, 0, slideY*QS, LOGICAL_R1_W*QS, LOGICAL_R1_H*QS);
+        } else {
+          let relX = (LOGICAL_R1_W - imgW) / 2.0;
+          fullImg.image(img, relX*QS, slideY*QS, imgW*QS, imgH*QS);
+        }
+      }
+
+      function analyzeDarkness() {
+        const W = fullImg.width;
+        const H = fullImg.height;
+        const snap = p.createImage(W, H);
+        snap.drawingContext.drawImage(fullImg.canvas, 0, 0, W, H);
+        snap.loadPixels();
+
+        let totalD = 0;
+        const cnt = W * H;
+        for (let i = 0; i < cnt; i++) {
+          const idx = i * 4;
+          totalD += 255 - (0.2126*snap.pixels[idx]
+                        + 0.7152*snap.pixels[idx+1]
+                        + 0.0722*snap.pixels[idx+2]);
+        }
+        avgDarkness = totalD / cnt;
+
+        const cd = new Float32Array(totalCells);
+        for (let cx = 0; cx < cols; cx++) {
+          for (let cy = 0; cy < rows; cy++) {
+            let s = 0, n = 0;
+            const px0 = Math.floor(cx * LOGICAL_CELL * QS);
+            const px1 = Math.floor((cx+1) * LOGICAL_CELL * QS);
+            const py0 = Math.floor(cy * LOGICAL_CELL * QS);
+            const py1 = Math.floor((cy+1) * LOGICAL_CELL * QS);
+            for (let py = py0; py < py1; py++) {
+              for (let px = px0; px < px1; px++) {
+                if (px < W && py < H) {
+                  const idx = (py * W + px) * 4;
+                  s += 255 - (0.2126*snap.pixels[idx]
+                            + 0.7152*snap.pixels[idx+1]
+                            + 0.0722*snap.pixels[idx+2]);
+                  n++;
+                }
+              }
+            }
+            cd[cy*cols + cx] = (n > 0) ? s/n : 0;
+          }
+        }
+
+        const indices = Array.from({length: totalCells}, (_, i) => i);
+        indices.sort((a, b) => cd[b] - cd[a]);
+        cellCategory = new Int32Array(totalCells);
+        for (let rank = 0; rank < totalCells; rank++) {
+          const i = indices[rank];
+          cellCategory[i] = (rank === 0) ? 2 : (rank <= 7) ? 1 : 0;
+        }
+      }
+
+      function testCanvasFilter() {
+        try {
+          const src = document.createElement('canvas');
+          src.width = 32; src.height = 8;
+          const sctx = src.getContext('2d');
+          sctx.fillStyle = '#000'; sctx.fillRect(0, 0, 16, 8);
+          sctx.fillStyle = '#fff'; sctx.fillRect(16, 0, 16, 8);
+          const dst = document.createElement('canvas');
+          dst.width = 32; dst.height = 8;
+          const dctx = dst.getContext('2d');
+          dctx.filter = 'blur(4px)';
+          dctx.drawImage(src, 0, 0);
+          dctx.filter = 'none';
+          const data = dctx.getImageData(0, 4, 32, 1).data;
+          let mixed = 0;
+          for (let x = 12; x <= 19; x++) {
+            const v = data[x*4];
+            if (v > 5 && v < 250) mixed++;
+          }
+          return mixed >= 2;
+        } catch (e) { return false; }
+      }
+
+      function precomputeBlurFramesInit() {
+        blurredFrames = new Array(blurSteps);
+        blurChunkIdx = 0;
+        if (canvasFilterWorks === null) {
+          canvasFilterWorks = testCanvasFilter();
+          console.log("[blur] canvas filter supported:", canvasFilterWorks);
+        }
+        blurStartTime = performance.now();
+
+        if (canvasFilterWorks) {
+          blurPad = Math.ceil(maxBlur * QS) + 4;
+          const baseW = fullImg.width;
+          const baseH = fullImg.height;
+          const pw = baseW + 2*blurPad;
+          const ph = baseH + 2*blurPad;
+          if (!blurSrcCanvas) blurSrcCanvas = document.createElement('canvas');
+          if (!blurDstCanvas) blurDstCanvas = document.createElement('canvas');
+          blurSrcCanvas.width  = pw;
+          blurSrcCanvas.height = ph;
+          blurDstCanvas.width  = baseW;
+          blurDstCanvas.height = baseH;
+          const sctx = blurSrcCanvas.getContext('2d');
+          sctx.fillStyle = 'rgb(0,0,0)';
+          sctx.fillRect(0, 0, pw, ph);
+          sctx.drawImage(fullImg.canvas, blurPad, blurPad, baseW, baseH);
+        } else {
+          const halfW = Math.max(1, Math.round(fullImg.width  / 2));
+          const halfH = Math.max(1, Math.round(fullImg.height / 2));
+          cpuHalfImg = p.createImage(halfW, halfH);
+          cpuHalfImg.drawingContext.drawImage(fullImg.canvas, 0, 0, halfW, halfH);
+        }
+      }
+
+      function precomputeBlurFramesStep(stepsPerFrame = 6) {
+        if (!blurredFrames) return true;
+        const end = Math.min(blurChunkIdx + stepsPerFrame, blurSteps);
+
+        if (canvasFilterWorks) {
+          const dctx = blurDstCanvas.getContext('2d');
+          const dw = blurDstCanvas.width, dh = blurDstCanvas.height;
+          for (; blurChunkIdx < end; blurChunkIdx++) {
+            const b = p.map(blurChunkIdx, 0, blurSteps-1, 0, maxBlur*QS);
+            dctx.clearRect(0, 0, dw, dh);
+            dctx.filter = b > 0 ? `blur(${b}px)` : 'none';
+            dctx.drawImage(blurSrcCanvas, -blurPad, -blurPad);
+            dctx.filter = 'none';
+            const pimg = p.createImage(dw, dh);
+            pimg.drawingContext.drawImage(blurDstCanvas, 0, 0);
+            blurredFrames[blurChunkIdx] = pimg;
+          }
+        } else {
+          for (; blurChunkIdx < end; blurChunkIdx++) {
+            const f = cpuHalfImg.get();
+            const b = p.map(blurChunkIdx, 0, blurSteps-1, 0, maxBlur*QS / 2);
+            if (b > 0) f.filter(p.BLUR, b);
+            const up = p.createImage(fullImg.width, fullImg.height);
+            up.drawingContext.drawImage(f.canvas, 0, 0, up.width, up.height);
+            blurredFrames[blurChunkIdx] = up;
+          }
+        }
+
+        if (blurChunkIdx >= blurSteps) {
+          lastFrame = blurredFrames[blurSteps - 1];
+          return true;
+        }
+        return false;
+      }
+
+      function resetCycle1(){
+        iteration=0; lightCount=0; darkCount=0;
+        colDrops=[0,0,0];
+        colScreenX=[r1cells[0].x, r1cells[1].x, r1cells[2].x];
+        colShiftFrom=colScreenX.slice();
+        colShiftTo=colScreenX.slice();
+        colShiftActive=false;
+        colHome=[0,1,2];        // mapped column-slot each column currently occupies
+        colHomePrev=[0,1,2];    // previous slot (for morphing during a shift)
+        lightSlots=Array.from({length:7},()=>[0,0]);
+        darkSlots=Array.from({length:7},()=>[0,0]);
+      }
+
+      function initIteration(){
+        curCX = 2 - Math.floor(iteration/rows);
+        curCY = rows-1 - (iteration%rows);
+        sortSpeedMult = 1.0 + iteration*0.35;
+      }
+
+      function easeInOut(t){ return t<0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2.0; }
+
+      function clipRect(x, y, w, h){
+        let ctx = p.drawingContext; ctx.save();
+        ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      }
+      function clipPoly(pts){
+        let ctx = p.drawingContext; ctx.save();
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath(); ctx.clip();
+      }
+      function noClip(){ p.drawingContext.restore(); }
+
+      /* ============ Cell-position helpers ============ */
+      function getR1Cell(cx, cy) { return r1cells[cy*cols + cx]; }
+      function getR1Shrunk(cx, cy) { return r1shrunk[cy*cols + cx]; }
+      function getR6CellRect(gcx, gcy) {
+        // Prefer the fully-mapped r6 mid grid (3 wide × 5 tall): r6mid[gcy*cols+gcx].
+        // This makes all 5 display rows mapping-driven and gap-free, matching exactly
+        // what was laid out in the editor (no uniform-bbox fallback between mapped rows).
+        if (r6mid.length >= rows*cols) {
+          const m = r6mid[gcy*cols + gcx];
+          if (m) return { x:m.x, y:m.y, w:m.w, h:m.h };
+        }
+        // Legacy fallbacks (older mappings without a full r6mid grid):
+        if (gcy === 0 && r6top.length > gcx && r6top[gcx]) return r6top[gcx];
+        if (gcy === rows-1 && r6bot.length > gcx && r6bot[gcx]) return r6bot[gcx];
+        const cellW = r6w / cols;
+        const cellH = r6h / rows;
+        return { x: r6x + gcx * cellW, y: r6y + gcy * cellH, w: cellW, h: cellH };
+      }
+      function getR3CellRect(k) {
+        const cw = r3w / 7;
+        return { x: r3x + k*cw, y: r3y, w: cw, h: r3h };
+      }
+      function getR4CellRect(k) {
+        const cw = r4w / 7;
+        return { x: r4x + k*cw, y: r4y, w: cw, h: r4h };
+      }
+      function lerpRect(r0, r1, t) {
+        return {
+          x: r0.x + (r1.x - r0.x)*t,
+          y: r0.y + (r1.y - r0.y)*t,
+          w: r0.w + (r1.w - r0.w)*t,
+          h: r0.h + (r1.h - r0.h)*t,
+        };
+      }
+      /* chainLerpRect: traverse through `steps` intermediate rects as t goes 0→1.
+         E.g. steps=3: t=0→parts[startIdx], t=1/3→parts[startIdx+1], t=2/3→parts[startIdx+2], t=1→parts[startIdx+3] */
+      function chainLerpRect(parts, startIdx, steps, t) {
+        if (steps <= 0 || t <= 0) {
+          const r = parts[Math.min(startIdx, parts.length-1)];
+          return r ? {x:r.x, y:r.y, w:r.w, h:r.h} : {x:0,y:0,w:0,h:0};
+        }
+        const pos = Math.min(t, 1.0) * steps;
+        const seg = Math.min(Math.floor(pos), steps - 1);
+        const segT = pos - seg;
+        const i0 = startIdx + seg;
+        const i1 = startIdx + seg + 1;
+        const r0 = (i0 < parts.length) ? parts[i0] : parts[parts.length - 1];
+        const r1 = (i1 < parts.length) ? parts[i1] : r0;
+        if (!r0) return {x:0,y:0,w:0,h:0};
+        if (!r1) return {x:r0.x,y:r0.y,w:r0.w,h:r0.h};
+        return lerpRect(r0, r1, segT);
+      }
+      function rectsIntersect(a, b) {
+        return !(a.x + a.w <= b.x || b.x + b.w <= a.x ||
+                 a.y + a.h <= b.y || b.y + b.h <= a.y);
+      }
+      /* Lerp two 4-corner quads. */
+      function lerpPts(p0, p1, t) {
+        const out = [];
+        for (let i = 0; i < 4; i++) out.push({ x: p0[i].x + (p1[i].x - p0[i].x)*t, y: p0[i].y + (p1[i].y - p0[i].y)*t });
+        return out;
+      }
+      /* Quad version of chainLerpRect: traverse the mapped CORNER quads of consecutive parts
+         as t:0→1, so a sliding piece stays inside the mapped strip shapes the whole way (it
+         never balloons to a bounding box). Returns null if pts are unavailable. */
+      function chainLerpQuad(parts, startIdx, steps, t) {
+        if (steps <= 0 || t <= 0) { const r = parts[Math.min(startIdx, parts.length-1)]; return (r && r.pts) ? r.pts : null; }
+        const pos = Math.min(t, 1.0) * steps;
+        const seg = Math.min(Math.floor(pos), steps - 1);
+        const segT = pos - seg;
+        const i0 = startIdx + seg, i1 = startIdx + seg + 1;
+        const a = (i0 < parts.length) ? parts[i0] : parts[parts.length - 1];
+        const b = (i1 < parts.length) ? parts[i1] : a;
+        if (!a || !a.pts) return null;
+        if (!b || !b.pts) return a.pts;
+        return lerpPts(a.pts, b.pts, segT);
+      }
+
+      /* === R6 full-height / mid-grid / squish helpers ===
+         During cycle: cells fill the FULL r6 height (5 rows, each r6h/5).
+         After squash: cells fill only the mid grid (r6mid, ~3/5 of r6h).
+         Squish interpolates each cell from full→mid so shared edges stay shared (no gaps).
+         (R6_MID_FRAC is declared near the top with other state.) */
+      function computeR6MidFrac() {
+        const g = r6BandGeom();
+        if (r6h > 0 && g.midH > 0) R6_MID_FRAC = g.midH / r6h;
+      }
+      function getR6MidRect(gcx, gcy) {
+        if (r6mid.length >= rows*cols) {
+          const m = r6mid[gcy*cols + gcx];
+          if (m) return { x:m.x, y:m.y, w:m.w, h:m.h };
+        }
+        const midH = r6h * R6_MID_FRAC;
+        const midY = r6y + (r6h - midH)/2;
+        const cw = r6w/cols, ch = midH/rows;
+        return { x: r6x + gcx*cw, y: midY + gcy*ch, w: cw, h: ch };
+      }
+      /* True when r6cols are 3 stacked full-width bands (top/mid/bottom) rather than 3
+         side-by-side columns — detected by the middle entry spanning most of the width. */
+      function r6ColsAreBands() {
+        return r6cols.length >= 3 && r6cols[0] && r6cols[1] && r6cols[2] &&
+               r6cols[1].w > r6w * 0.6;
+      }
+      /* Band geometry: top/mid/bottom band heights & positions. Derived from the stable
+         mapped BANDS (r6cols) when present, so editing a single mid CELL changes only that
+         cell's squish target — not the whole segment's cycle layout or squish range. Falls
+         back to the mid-grid extent only when no bands are mapped. */
+      function r6BandGeom() {
+        if (r6ColsAreBands()) {
+          const mb = r6cols[1];
+          const topH = Math.max(0, mb.y - r6y);
+          const botH = Math.max(0, (r6y + r6h) - (mb.y + mb.h));
+          return { topH, botH, midY: mb.y, midH: Math.max(1, mb.h) };
+        }
+        // No mapped bands: use a FIXED 3/5 centred mid band. This is deliberately NOT derived
+        // from the per-cell mid extremes, so editing one mid cell only moves that cell's squish
+        // target — it never changes the cycle layout or the global squish range.
+        const midH = r6h * 0.6;
+        const topH = (r6h - midH) / 2;
+        const botH = r6h - midH - topH;
+        return { topH, botH, midY: r6y + topH, midH };
+      }
+      /* CYCLE layout. When the three full-width bands are mapped (r6cols = top/mid/bottom),
+         EACH band is independent: the top row is laid out inside the top band, the bottom row
+         inside the bottom band, and the middle rows inside the middle band. So resizing the
+         top or bottom band (position, width OR height) changes ONLY that row — the middle
+         keeps its size and position. (The mapped per-cell jitter is applied by the squish.) */
+      function getR6FullRect(gcx, gcy) {
+        if (r6ColsAreBands()) {
+          let band, rowInBand, rowsInBand;
+          if (gcy === 0)           { band = r6cols[0]; rowInBand = 0;        rowsInBand = 1; }
+          else if (gcy === rows-1) { band = r6cols[2]; rowInBand = 0;        rowsInBand = 1; }
+          else                     { band = r6cols[1]; rowInBand = gcy - 1;  rowsInBand = rows - 2; }
+          const colW = band.w / cols;
+          const rh = band.h / rowsInBand;
+          return { x: band.x + gcx*colW, y: band.y + rowInBand*rh, w: colW, h: rh };
+        }
+        // Fallback (no mapped bands): clean uniform grid with a fixed centred mid band.
+        const g = r6BandGeom();
+        const colW = r6w / cols;
+        const x = r6x + gcx*colW;
+        let y, h;
+        if (gcy === 0)            { y = r6y;                 h = g.topH; }
+        else if (gcy === rows-1)  { y = r6y + r6h - g.botH;  h = g.botH; }
+        else {
+          const midRows = rows - 2;                 // uniform middle rows
+          const rh = g.midH / midRows;
+          y = g.midY + (gcy - 1)*rh; h = rh;
+        }
+        return { x, y, w: colW, h };
+      }
+      function getR6SquishRect(gcx, gcy, squishFactor) {
+        const full = getR6FullRect(gcx, gcy);       // clean uniform cycle rect
+        const mid = getR6MidRect(gcx, gcy);         // mapped mid cell (squish target)
+        const range = 1.0 - R6_MID_FRAC;
+        const t = (range > 0.0001) ? Math.max(0, Math.min(1, (1.0 - squishFactor) / range)) : 1.0;
+        return lerpRect(full, mid, t);
+      }
+      /* Draw a cell rotated by angleDeg, filling dest (screen-axis-aligned). For ±90° the
+         draw dims are swapped so the rotated content fills the rect instead of overflowing. */
+      function drawRotatedFill(cImg, cxp, cyp, w, h, angleDeg) {
+        p.push();
+        p.translate(cxp, cyp);
+        p.rotate(p.radians(angleDeg));
+        p.imageMode(p.CENTER);
+        if (Math.abs(((angleDeg % 180) + 180) % 180 - 90) < 0.5) p.image(cImg, 0, 0, h, w);
+        else p.image(cImg, 0, 0, w, h);
+        p.imageMode(p.CORNER);
+        p.pop();
+      }
+
+      /* drawCellAtRect: draw cell from lastFrame using 9-arg p.image — ONLY used by drawCells (phase 1). */
+      function drawCellAtRect(destRect, origCX, origCY, clipR) {
+        if (clipR) {
+          const ix = Math.max(destRect.x, clipR.x);
+          const iy = Math.max(destRect.y, clipR.y);
+          const ix2 = Math.min(destRect.x + destRect.w, clipR.x + clipR.w);
+          const iy2 = Math.min(destRect.y + destRect.h, clipR.y + clipR.h);
+          if (ix2 <= ix || iy2 <= iy) return;
+          clipRect(ix, iy, Math.ceil(ix2-ix), Math.ceil(iy2-iy));
+        }
+        const cs = LOGICAL_CELL * QS;
+        p.image(lastFrame,
+                destRect.x, destRect.y, destRect.w, destRect.h,
+                origCX*cs, origCY*cs, cs, cs);
+        if (clipR) noClip();
+      }
+
+      /* ============ Original drawing functions (whole-image-offset + clip) ============ */
+
+      function drawCellAt(sx,sy,origCX,origCY,fx,fy,fw,fh){
+        let ix=Math.max(sx,fx),iy=Math.max(sy,fy);
+        let iw=Math.min(sx+cell,fx+fw)-ix,ih=Math.min(sy+cell,fy+fh)-iy;
+        if(iw<=0||ih<=0) return;
+        clipRect(ix,iy,Math.ceil(iw),Math.ceil(ih));
+        p.image(lastFrame,sx-origCX*cell,sy-origCY*cell,LOGICAL_R1_W,LOGICAL_R1_H);
+        noClip();
+      }
+
+      function drawRotatedCellAt(cx,cy,angleDeg,fx,fy,fw,fh){
+        let ix=Math.max(cx,fx),iy=Math.max(cy,fy);
+        let iw=Math.min(cx+cell,fx+fw)-ix,ih=Math.min(cy+cell,fy+fh)-iy;
+        if(iw<=0||ih<=0) return;
+        clipRect(ix,iy,Math.ceil(iw),Math.ceil(ih));
+        p.push(); p.translate(cx+cell/2.0,cy+cell/2.0); p.rotate(p.radians(angleDeg));
+        p.imageMode(p.CENTER); p.image(exitCellImg,0,0,cell,cell); p.imageMode(p.CORNER);
+        p.pop(); noClip();
+      }
+
+      function drawColumn(cx,screenX,dropped,isFalling,fp){
+        if(dropped>=rows) return;
+        // Per-cell MAPPED column draw.
+        //  Vertical fall: as the bottom cell exits, cells above ease down one slot.
+        //  Horizontal shift: a column that slides into the next column's position
+        //  ADOPTS that column's mapping. We track which mapped column-slot each column
+        //  occupies in colHome[] (colHomePrev[] = before the current shift). During a
+        //  shift each cell morphs from its previous-slot rect to its current-slot rect.
+        const cs = LOGICAL_CELL * QS;
+        const fall = isFalling ? Math.max(0, Math.min(1, fp)) : 0;
+        const maxSrc = rows - 1 - dropped;             // bottom-most visible source row
+
+        // Horizontal morph fraction between previous and current mapped column slot.
+        const homeCol = colHome[cx];                   // mapped column this column maps to now
+        const prevCol = colHomePrev[cx];               // mapped column before the shift
+        let mf = 1;                                    // 1 = fully at current home
+        if (colShiftActive && prevCol !== homeCol) {
+          const span = colShiftTo[cx] - colShiftFrom[cx];
+          mf = (Math.abs(span) > 0.0001)
+             ? Math.max(0, Math.min(1, (screenX - colShiftFrom[cx]) / span))
+             : 1;
+        }
+        // mapped rect for a display slot, using the column's current mapped slot,
+        // morphed from its previous mapped slot during a shift.
+        const rectFor = (slot) => {
+          const cur = r1cells[slot*cols + homeCol];
+          if (mf >= 1 || prevCol === homeCol) return { x:cur.x, y:cur.y, w:cur.w, h:cur.h };
+          const prev = r1cells[slot*cols + prevCol];
+          return lerpRect(prev, cur, mf);
+        };
+
+        for (let sr = 0; sr <= maxSrc; sr++) {
+          const slot = sr + dropped;                   // settled display slot for this row
+          if (slot === rows-1 && isFalling) continue;  // exiting cell drawn by drawCellAt
+          const here = rectFor(slot);
+          let dest;
+          if (fall > 0 && slot < rows-1) {
+            const below = rectFor(slot+1);             // drops into next slot (also morphed)
+            dest = lerpRect(here, below, fall);
+          } else {
+            dest = here;
+          }
+          p.image(lastFrame, dest.x, dest.y, dest.w, dest.h,
+                  cx*cs, sr*cs, cs, cs);
+        }
+      }
+
+      function drawFrame1(activeCX,fp){
+        p.noStroke();p.fill(0,0,0);p.rect(r1x,r1y,r1w,r1h);
+        for(let cx=0;cx<cols;cx++)
+          drawColumn(cx,colScreenX[cx],colDrops[cx],(cx===activeCX),(cx===activeCX)?fp:0);
+      }
+
+      /* drawCells: phase-1 shrink animation. Each cell interpolates between
+         its r1cells[] rect and its r1shrunk[] rect based on sf.
+         sf=1 → full position; sf=0.5 → shrunken position; mapped via t. */
+      function drawCells(sf, bs) {
+        p.noStroke(); p.fill(0,0,0);
+        p.rect(r1x, r1y, r1w, r1h);
+        const t = Math.max(0, Math.min(1, (1 - sf) * 2));
+        const frame = blurredFrames[bs];
+        const cs = LOGICAL_CELL * QS;
+        for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+          const idx = cy*cols + cx;
+          const dest = lerpRect(r1cells[idx], r1shrunk[idx], t);
+          p.image(frame,
+                  dest.x, dest.y, dest.w, dest.h,
+                  cx*cs, cy*cs, cs, cs);
+        }
+      }
+
+      /* drawIncomingSlice: render the raw incoming image already CUT into the 15
+         mapped cells. Each source cell square is drawn into its r1cells[] rect, so the
+         entrance matches the mapping grid (no whole-block rendering, no handoff shift).
+         slideYLogical (logical units, negative = above) makes the image content slide
+         down into place; out-of-image source is left black (the reveal). */
+      function drawIncomingSlice(slideYLogical) {
+        p.noStroke(); p.fill(0,0,0);
+        p.rect(r1x, r1y, r1w, r1h);
+        if (!img) return;
+        const sc = imgW / img.width;               // logical-per-source scale (imgW = img.width*sc)
+        const relX = (LOGICAL_R1_W - imgW)/2.0;   // logical, horizontal centring
+        const iw = img.width, ih = img.height;     // source pixels
+        clipRect(r1x, r1y, r1w, r1h);
+        for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+          const dest = r1cells[cy*cols + cx];
+          let dx = dest.x, dy = dest.y, dw = dest.w, dh = dest.h;
+          // source rect in img pixels for this logical cell
+          let sx = (cx*cell - relX) / sc;
+          let sy = (cy*cell - slideYLogical) / sc;
+          let sw = cell / sc, sh = cell / sc;
+          // clamp source to image bounds, shrinking dest proportionally (keeps no-stretch)
+          if (sx < 0)         { const f=(-sx)/sw;        dx+=f*dw; dw-=f*dw; sw+=sx;        sx=0; }
+          if (sx + sw > iw)   { const f=((sx+sw)-iw)/sw;          dw-=f*dw; sw=iw-sx;                }
+          if (sy < 0)         { const f=(-sy)/sh;        dy+=f*dh; dh-=f*dh; sh+=sy;        sy=0; }
+          if (sy + sh > ih)   { const f=((sy+sh)-ih)/sh;          dh-=f*dh; sh=ih-sy;                }
+          if (sw > 0 && sh > 0 && dw > 0 && dh > 0) {
+            p.image(img, dx, dy, dw, dh, sx, sy, sw, sh);
+          }
+        }
+        noClip();
+      }
+
+      /* r1BottomScaleRect: full mapped slot rect scaled VERTICALLY toward the BOTTOM edge
+         of r1 by sf (sf=1 → full; sf<1 → squished, sitting at the bottom of the frame).
+         x/width untouched. This makes the squished picture sit at the bottom and grow
+         upward as sf → 1. */
+      function r1BottomScaleRect(cx, s, sf) {
+        const full = r1cells[Math.max(0, Math.min(rows-1, s))*cols + cx];
+        const anchorY = r1y + r1h;                       // bottom of r1
+        return { x: full.x, y: anchorY + (full.y - anchorY)*sf, w: full.w, h: full.h*sf };
+      }
+      /* Bottom-squished rect at a FRACTIONAL slot (lerps between slots so a dropping piece
+         tracks each slot's real x/y; extrapolates above for entry from the top). */
+      function r1BottomMidSlotRectFrac(cx, f) {
+        const mid = (s) => r1BottomScaleRect(cx, s, R6_MID_FRAC);
+        if (f < 0) {
+          const m0 = mid(0);
+          const fStep = (rows > 1) ? (r1cells[1*cols+cx].y - r1cells[0*cols+cx].y) : m0.h;
+          return { x: m0.x, y: m0.y + f*fStep, w: m0.w, h: m0.h };
+        }
+        if (f > rows-1) {
+          const mL = mid(rows-1);
+          const step = (rows > 1) ? (mL.y - mid(rows-2).y) : mL.h;
+          return { x: mL.x, y: mL.y + (f-(rows-1))*step, w: mL.w, h: mL.h };
+        }
+        const lo = Math.floor(f), frac = f - lo;
+        return lerpRect(mid(lo), mid(lo+1), frac);
+      }
+
+      function captureSrcRect(cx, k, cw, ch) {
+        return {
+          sx: (cx*cell / LOGICAL_R1_W) * cw,
+          sy: (k*cell  / LOGICAL_R1_H) * ch,
+          sw: (cell / LOGICAL_R1_W) * cw,
+          sh: (cell / LOGICAL_R1_H) * ch,
+        };
+      }
+
+      /* PHASE 1 of the looped entrance — DROP. The squished picture falls in as ONE cohesive
+         block on a CLEAN UNIFORM grid (squares edge-to-edge, NO spaces between them), settling
+         squished at the BOTTOM of the frame. */
+      function drawIncomingCaptureDrop(dropT) {
+        p.noStroke(); p.fill(0,0,0);
+        p.rect(r1x, r1y, r1w, r1h);
+        if (!capturedF6 || capturedF6.width <= 0 || capturedF6.height <= 0) return;
+        const cw = capturedF6.width, ch = capturedF6.height;
+        const e = easeInOut(Math.max(0, Math.min(1, dropT)));
+        const sqH = r1h * R6_MID_FRAC;                       // squished total height
+        const blockY = p.lerp(r1y - sqH, r1y + r1h - sqH, e); // from above → resting at bottom
+        const colW = r1w / cols, rowH = sqH / rows;
+        clipRect(r1x, r1y, r1w, r1h);
+        const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+        for (let cx = 0; cx < cols; cx++) {
+          for (let k = 0; k < rows; k++) {
+            const dx = r1x + cx*colW, dy = blockY + k*rowH;
+            const s = captureSrcRect(cx, k, cw, ch);
+            // +1px overlap (except last col/row) so adjacent tiles leave NO seam
+            const ew = colW + (cx < cols-1 ? 1 : 0), eh = rowH + (k < rows-1 ? 1 : 0);
+            p.image(capturedF6, dx, dy, ew, eh, s.sx, s.sy, s.sw, s.sh);
+          }
+        }
+        dctx.imageSmoothingEnabled=true;
+        noClip();
+      }
+
+      /* PHASE 2 of the looped entrance — GROW UPWARD. The clean uniform block grows
+         VERTICALLY from squished (3/5) to full height, bottom edge fixed, top growing up,
+         squares staying edge-to-edge (no spaces). At unsT=1 it fills r1 as a uniform grid. */
+      function drawIncomingCaptureUnsquish(unsT) {
+        p.noStroke(); p.fill(0,0,0);
+        p.rect(r1x, r1y, r1w, r1h);
+        if (!capturedF6 || capturedF6.width <= 0 || capturedF6.height <= 0) return;
+        const cw = capturedF6.width, ch = capturedF6.height;
+        const e = easeInOut(Math.max(0, Math.min(1, unsT)));
+        const h = p.lerp(r1h * R6_MID_FRAC, r1h, e);   // grow 3/5 → full
+        const blockY = r1y + r1h - h;                  // bottom-anchored
+        const colW = r1w / cols, rowH = h / rows;
+        clipRect(r1x, r1y, r1w, r1h);
+        const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+        for (let cx = 0; cx < cols; cx++) {
+          for (let k = 0; k < rows; k++) {
+            const dx = r1x + cx*colW, dy = blockY + k*rowH;
+            const s = captureSrcRect(cx, k, cw, ch);
+            const ew = colW + (cx < cols-1 ? 1 : 0), eh = rowH + (k < rows-1 ? 1 : 0);
+            p.image(capturedF6, dx, dy, ew, eh, s.sx, s.sy, s.sw, s.sh);
+          }
+        }
+        dctx.imageSmoothingEnabled=true;
+        noClip();
+      }
+
+      function partsBBox(parts,i){const a=parts[i],b=parts[i+1],c=parts[i+2];if(!a||!b||!c)return null;return{x:Math.min(a.x,b.x,c.x),y:Math.min(a.y,b.y,c.y),w:Math.max(a.x+a.w,b.x+b.w,c.x+c.w)-Math.min(a.x,b.x,c.x),h:Math.max(a.y+a.h,b.y+b.h,c.y+c.h)-Math.min(a.y,b.y,c.y)};}
+
+      function drawPlacedCells(){
+        const cs=Math.floor(cell*QS);
+        const sb=[0,Math.round(cs/3),Math.round(cs*2/3),cs];
+        const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+        for(let k=0;k<lightCount;k++){
+          const ox=lightSlots[k][0],oy=lightSlots[k][1];
+          for(let s=0;s<3;s++){
+            const part=r3parts[k*3+s]; if(!part)continue;
+            const sx=ox*cs+sb[s], sy=oy*cs, sw=sb[s+1]-sb[s], sh=cs;
+            if(!(part.pts && drawImageAffineQuad(lastFrame, sx, sy, sw, sh, part.pts, 255)))
+              p.image(lastFrame,part.x,part.y,part.w+(s<2?1:0),part.h,sx,sy,sw,sh);
+          }
+        }
+        for(let k=0;k<darkCount;k++){
+          const ox=darkSlots[k][0],oy=darkSlots[k][1];
+          for(let s=0;s<3;s++){
+            const part=r4parts[k*3+s]; if(!part)continue;
+            const sx=ox*cs+sb[s], sy=oy*cs, sw=sb[s+1]-sb[s], sh=cs;
+            if(!(part.pts && drawImageAffineQuad(lastFrame, sx, sy, sw, sh, part.pts, 255)))
+              p.image(lastFrame,part.x,part.y,part.w+(s<2?1:0),part.h,sx,sy,sw,sh);
+          }
+        }
+        dctx.imageSmoothingEnabled=true;
+      }
+
+      /* Draw a sub-rect (sx,sy,sw,sh) of a p5.Image so it fills the mapped quad `pts`
+         (TL,TR,BR,BL). Uses an affine fit (TL,TR,BL) composed onto p5's current transform
+         (so retina scaling is preserved) and clips to the exact quad so the silhouette
+         matches the mapping. Affine is exact for a parallelogram; for a slight trapezoid the
+         clip trims the small residual. */
+      function drawImageAffineQuad(srcImg, sx, sy, sw, sh, pts, alpha) {
+        if (!pts || pts.length < 4 || sw <= 0 || sh <= 0) return false;
+        const ctx = p.drawingContext;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
+        ctx.clip();
+        const TL = pts[0], TR = pts[1], BL = pts[3];
+        const a = (TR.x - TL.x) / sw, b = (TR.y - TL.y) / sw;
+        const c = (BL.x - TL.x) / sh, d = (BL.y - TL.y) / sh;
+        ctx.transform(a, b, c, d, TL.x, TL.y);   // composes with p5 transform
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha / 255));
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(srcImg.canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+        ctx.globalAlpha = 1;
+        ctx.imageSmoothingEnabled = true;
+        ctx.restore();
+        return true;
+      }
+
+      /* Map a SOURCE triangle (s0,s1,s2) onto a DEST triangle (d0,d1,d2) via an affine
+         transform, clipped to the dest triangle. Building block for the quad warp. */
+      function drawTexTri(ctx, img, s0, s1, s2, d0, d1, d2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(d0.x, d0.y); ctx.lineTo(d1.x, d1.y); ctx.lineTo(d2.x, d2.y); ctx.closePath();
+        ctx.clip();
+        const denom = (s1.x - s0.x)*(s2.y - s0.y) - (s2.x - s0.x)*(s1.y - s0.y);
+        if (Math.abs(denom) < 1e-6) { ctx.restore(); return; }
+        const a = ((d1.x - d0.x)*(s2.y - s0.y) - (d2.x - d0.x)*(s1.y - s0.y)) / denom;
+        const b = ((d1.y - d0.y)*(s2.y - s0.y) - (d2.y - d0.y)*(s1.y - s0.y)) / denom;
+        const c = ((d2.x - d0.x)*(s1.x - s0.x) - (d1.x - d0.x)*(s2.x - s0.x)) / denom;
+        const d = ((d2.y - d0.y)*(s1.x - s0.x) - (d1.y - d0.y)*(s2.x - s0.x)) / denom;
+        const e = d0.x - a*s0.x - c*s0.y;
+        const f = d0.y - b*s0.x - d*s0.y;
+        ctx.transform(a, b, c, d, e, f);
+        ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, img.width, img.height);
+        ctx.restore();
+      }
+      function _bilerp(TL, TR, BR, BL, u, v) {
+        const tx = TL.x + (TR.x - TL.x)*u, ty = TL.y + (TR.y - TL.y)*u;
+        const bx = BL.x + (BR.x - BL.x)*u, by = BL.y + (BR.y - BL.y)*u;
+        return { x: tx + (bx - tx)*v, y: ty + (by - ty)*v };
+      }
+      /* TRUE quad warp: fills the EXACT mapped quad `pts` (TL,TR,BR,BL) with sub-rect
+         (sx,sy,sw,sh) of srcImg, by subdividing into an N×N mesh and warping each cell with
+         two textured triangles. Honours all four corners (so a trapezoid looks like the
+         trapezoid, not a square). */
+      function drawImageQuadBilinear(srcImg, sx, sy, sw, sh, pts, alpha, N) {
+        if (!pts || pts.length < 4 || sw <= 0 || sh <= 0) return false;
+        N = N || 8;
+        const TL = pts[0], TR = pts[1], BR = pts[2], BL = pts[3];
+        const ctx = p.drawingContext;
+        const can = srcImg.canvas;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha / 255));
+        ctx.imageSmoothingEnabled = false;
+        for (let j = 0; j < N; j++) {
+          for (let i = 0; i < N; i++) {
+            const u0 = i/N, u1 = (i+1)/N, v0 = j/N, v1 = (j+1)/N;
+            const d00 = _bilerp(TL, TR, BR, BL, u0, v0);
+            const d10 = _bilerp(TL, TR, BR, BL, u1, v0);
+            const d11 = _bilerp(TL, TR, BR, BL, u1, v1);
+            const d01 = _bilerp(TL, TR, BR, BL, u0, v1);
+            const s00 = { x: sx + u0*sw, y: sy + v0*sh };
+            const s10 = { x: sx + u1*sw, y: sy + v0*sh };
+            const s11 = { x: sx + u1*sw, y: sy + v1*sh };
+            const s01 = { x: sx + u0*sw, y: sy + v1*sh };
+            drawTexTri(ctx, can, s00, s10, s01, d00, d10, d01);
+            drawTexTri(ctx, can, s10, s11, s01, d10, d11, d01);
+          }
+        }
+        ctx.globalAlpha = 1; ctx.imageSmoothingEnabled = true;
+        ctx.restore();
+        return true;
+      }
+
+      function drawDarkestFrame() {
+        p.noStroke(); p.fill(0,0,0);
+        if (r7aPts) { p.beginShape(); for (const pt of r7aPts) p.vertex(pt.x, pt.y); p.endShape(p.CLOSE); }
+        else p.rect(r7ax, r7ay, r7aw, r7ah);
+        if (r7bPts) { p.beginShape(); for (const pt of r7bPts) p.vertex(pt.x, pt.y); p.endShape(p.CLOSE); }
+        else p.rect(r7bx, r7by, r7bw, r7bh);
+        if (darkestVisible && darkestCellImg) {
+          const sw=darkestCellImg.width, sh=darkestCellImg.height;
+          // Split the source by the MAPPED widths (r7a vs r7b), not a fixed 2/3.
+          const denom = (r7aw + r7bw) > 0 ? (r7aw + r7bw) : sw;
+          const splitW = Math.round(sw * (r7aw / denom));
+          // Single affine warp clipped to the exact mapped quad — fills all four corners
+          // (slight keystone) with NO internal mesh seams.
+          const okA = r7aPts && drawImageAffineQuad(darkestCellImg, 0, 0, splitW, sh, r7aPts, darkestAlpha);
+          const okB = r7bPts && drawImageAffineQuad(darkestCellImg, splitW, 0, sw-splitW, sh, r7bPts, darkestAlpha);
+          if (!okA || !okB) {
+            const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+            p.tint(255, darkestAlpha);
+            if (!okA) p.image(darkestCellImg, r7ax, r7ay, r7aw+1, r7ah, 0, 0, splitW, sh);
+            if (!okB) p.image(darkestCellImg, r7bx, r7by, r7bw+1, r7bh, splitW, 0, sw-splitW, sh);
+            p.noTint();
+            dctx.imageSmoothingEnabled=true;
+          }
+        }
+      }
+
+      function advanceShift(){
+        if(!colShiftActive) return;
+        shiftT=Math.min(shiftT+speed*3.0*sortSpeedMult,1.0);
+        let se=easeInOut(shiftT);
+        for(let cx=0;cx<cols;cx++) colScreenX[cx]=p.lerp(colShiftFrom[cx],colShiftTo[cx],se);
+      }
+
+      function completeIteration(){
+        let cat=cellCategory[curCY*cols+curCX];
+        if(cat===0){lightSlots[lightCount][0]=curCX;lightSlots[lightCount][1]=curCY;lightCount++;}
+        else if(cat===1){darkSlots[darkCount][0]=curCX;darkSlots[darkCount][1]=curCY;darkCount++;}
+        else if(cat===2){
+          darkestCellImg=lastFrame.get(curCX*Math.floor(cell*QS),curCY*Math.floor(cell*QS),Math.floor(cell*QS),Math.floor(cell*QS));
+          darkestVisible=true; darkestAlpha=255;
+        }
+        colDrops[curCX]++;
+        if(colShiftActive){for(let cx=0;cx<cols;cx++) colScreenX[cx]=colShiftTo[cx];colShiftActive=false;}
+        iteration++;
+        if(iteration>=totalCells){phase=4;phase4timer=0;return;}
+        initIteration(); phase=2; slideT=0; fallT=0;
+      }
+
+      function setupCycle() {
+        const startLight = p.random(1) < 0.5;
+        cycleOrder = new Array(14);
+        for (let i = 0; i < 14; i++) cycleOrder[i] = startLight ? (i%2===0) : (i%2===1);
+        cycleIter = 0; f3Exited = 0; f4Exited = 0;
+        stepShiftT = 0; stepShiftActive = false;
+        f6Count2 = 0;
+        for (let i = 0; i < cols*rows; i++) f6Used[i] = false;
+      }
+
+      function startCycleStep() {
+        const fromLight = cycleOrder[cycleIter];
+        if (fromLight) {
+          const j = lightCount - f3Exited - 1;
+          exitOrigCX = lightSlots[j][0]; exitOrigCY = lightSlots[j][1];
+        } else {
+          const j = darkCount - f4Exited - 1;
+          exitOrigCX = darkSlots[j][0]; exitOrigCY = darkSlots[j][1];
+        }
+        const cs = Math.floor(LOGICAL_CELL * QS);
+        exitCellImg = lastFrame.get(exitOrigCX*cs, exitOrigCY*cs, cs, cs);
+        outSlideT = 0; rotDeg = 0; toF6T = 0;
+        rotAngle = 90.0;
+        rotDirection = p.random(1) < 0.5 ? 1.0 : -1.0;
+        cycleSpeedMult = 1.0 + (13 - cycleIter)*0.35;
+        stepShiftT = 0; stepShiftActive = false;
+        phase = 5;
+      }
+
+      function completeCycleStep() {
+        const fromLight = cycleOrder[cycleIter];
+        if (fromLight) f3Exited++; else f4Exited++;
+        stepShiftT = 0; stepShiftActive = false;
+        let slot;
+        if (f6Count2 === 0) { slot = 0; f6Used[0] = true; }
+        else {
+          const avail = [];
+          for (let i = 0; i < cols*rows; i++) if (!f6Used[i]) avail.push(i);
+          slot = avail[Math.floor(p.random(avail.length))];
+          f6Used[slot] = true;
+        }
+        f6Data[f6Count2][0] = slot;
+        f6Data[f6Count2][1] = exitOrigCX;
+        f6Data[f6Count2][2] = exitOrigCY;
+        f6Data[f6Count2][3] = Math.floor(rotAngle * rotDirection);
+        f6Count2++;
+        cycleIter++;
+        if (cycleIter >= 14) { phase = 8; p8state = 0; p8timer = 0; return; }
+        startCycleStep();
+      }
+
+      function drawFrame3Out(lightStep){
+        p.noStroke();p.fill(0,0,0);p.rect(r3x,r3y,r3w,r3h);
+        let rem=lightCount-f3Exited; if(rem<=0) return;
+        let drawCount=lightStep?rem-1:rem;
+        const cs=Math.floor(cell*QS);
+        const sb=[0,Math.round(cs/3),Math.round(cs*2/3),cs];
+        const shiftFrac=(lightStep&&stepShiftActive)?easeInOut(stepShiftT):0;
+        const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+        for(let j=0;j<drawCount;j++){
+          const ox=lightSlots[j][0],oy=lightSlots[j][1];
+          for(let s=0;s<3;s++){
+            const fromIdx=(j+f3Exited)*3+s;
+            const part=r3parts[fromIdx]; if(!part)continue;
+            const sx=ox*cs+sb[s], sy=oy*cs, sw=sb[s+1]-sb[s];
+            const qpts=part.pts?chainLerpQuad(r3parts, fromIdx, 3, shiftFrac):null;
+            if(!(qpts && drawImageAffineQuad(lastFrame, sx, sy, sw, cs, qpts, 255))){
+              const dest=chainLerpRect(r3parts, fromIdx, 3, shiftFrac);
+              p.image(lastFrame,dest.x,dest.y,dest.w+(s<2?1:0),dest.h,sx,sy,sw,cs);
+            }
+          }
+        }
+        dctx.imageSmoothingEnabled=true;
+      }
+      function drawFrame4Out(darkStep){
+        p.noStroke();p.fill(0,0,0);p.rect(r4x,r4y,r4w,r4h);
+        let rem=darkCount-f4Exited; if(rem<=0) return;
+        let drawCount=darkStep?rem-1:rem;
+        const cs=Math.floor(cell*QS);
+        const sb=[0,Math.round(cs/3),Math.round(cs*2/3),cs];
+        const shiftFrac=(darkStep&&stepShiftActive)?easeInOut(stepShiftT):0;
+        const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+        for(let j=0;j<drawCount;j++){
+          const ox=darkSlots[j][0],oy=darkSlots[j][1];
+          for(let s=0;s<3;s++){
+            const fromIdx=(j+f4Exited)*3+s;
+            const part=r4parts[fromIdx]; if(!part)continue;
+            const sx=ox*cs+sb[s], sy=oy*cs, sw=sb[s+1]-sb[s];
+            const qpts=part.pts?chainLerpQuad(r4parts, fromIdx, 3, shiftFrac):null;
+            if(!(qpts && drawImageAffineQuad(lastFrame, sx, sy, sw, cs, qpts, 255))){
+              const dest=chainLerpRect(r4parts, fromIdx, 3, shiftFrac);
+              p.image(lastFrame,dest.x,dest.y,dest.w+(s<2?1:0),dest.h,sx,sy,sw,cs);
+            }
+          }
+        }
+        dctx.imageSmoothingEnabled=true;
+      }
+
+      /* drawFrame6: place each cycled cell in r6 bbox (3×5 grid within full r6 area).
+         slideOffset shifts cells vertically (used during initial settle). */
+      function drawFrame6(slideOffset) {
+        p.noStroke(); p.fill(0,0,0);
+        p.rect(r6x, r6y, r6w, r6h);
+        const srcPx = Math.floor(LOGICAL_CELL * QS);
+        for (let i = 0; i < f6Count2; i++) {
+          const slotVal = f6Data[i][0];
+          const gcx = slotVal % cols, gcy = Math.floor(slotVal / cols);
+          const dest = getR6FullRect(gcx, gcy);   // clean uniform grid (mapped top/bottom bands)
+          dest.y += slideOffset;
+          const angleDeg = f6Data[i][3];
+          const ix = Math.max(dest.x, r6x), iy = Math.max(dest.y, r6y);
+          const ix2 = Math.min(dest.x + dest.w, r6x + r6w);
+          const iy2 = Math.min(dest.y + dest.h, r6y + r6h);
+          if (ix2 <= ix || iy2 <= iy) continue;
+          clipRect(ix, iy, Math.ceil(ix2-ix), Math.ceil(iy2-iy));
+          const cImg = lastFrame.get(f6Data[i][1]*srcPx, f6Data[i][2]*srcPx, srcPx, srcPx);
+          drawRotatedFill(cImg, dest.x + dest.w/2, dest.y + dest.h/2, dest.w, dest.h, angleDeg);
+          noClip();
+        }
+      }
+
+      /* captureFrame6: single buffer capturing all of r6 at r6w×r6h.
+         r6cols[0..2] define the top/mid/bot projection surfaces but the
+         capture uses the full r6 bounding box so the squish math is consistent. */
+      function captureFrame6() {
+        const cs = 2;
+        const srcPx = Math.floor(LOGICAL_CELL * QS);
+        const cellW = r6w / cols, cellH = r6h / rows;
+        const pg = p.createGraphics(Math.round(r6w * cs), Math.round(r6h * cs));
+        pg.background(0,0,0);
+        pg.drawingContext.imageSmoothingEnabled = false;
+        const infl = cs; // ~1px (in logical) overlap so the uniform tiles leave no seam
+        for (let i = 0; i < f6Count2; i++) {
+          const slotVal = f6Data[i][0];
+          const gcx = slotVal % cols, gcy = Math.floor(slotVal / cols);
+          const sx = gcx * cellW * cs;
+          const sy = gcy * cellH * cs;
+          const sw = cellW * cs + infl, sh = cellH * cs + infl;
+          const angleDeg = f6Data[i][3];
+          const cImg = lastFrame.get(f6Data[i][1]*srcPx, f6Data[i][2]*srcPx, srcPx, srcPx);
+          pg.push();
+          pg.translate(sx + (cellW*cs)/2, sy + (cellH*cs)/2);
+          pg.rotate(p.radians(angleDeg));
+          pg.imageMode(p.CENTER);
+          if (Math.abs(((angleDeg % 180) + 180) % 180 - 90) < 0.5) pg.image(cImg, 0, 0, sh, sw);
+          else pg.image(cImg, 0, 0, sw, sh);
+          pg.imageMode(p.CORNER);
+          pg.pop();
+        }
+        f6FullCapture = pg.get();
+      }
+
+      /* Squish: each cell interpolates from its CLEAN-uniform cycle rect to its MAPPED mid
+         cell (getR6SquishRect), so the squares move onto their mapped middle positions. The
+         ±90° rotation is filled to the cell (drawRotatedFill), so the picture compresses
+         vertically (5-tall → 3-tall) without the rotation turning it into a width change.
+         slideXOff slides the whole thing right for the exit. */
+      function drawFrame6Squish(squishFactor, slideXOff) {
+        p.noStroke(); p.fill(0,0,0);
+        p.rect(r6x, r6y, r6w, r6h);
+        const srcPx = Math.floor(LOGICAL_CELL * QS);
+        for (let i = 0; i < f6Count2; i++) {
+          const slotVal = f6Data[i][0];
+          const gcx = slotVal % cols, gcy = Math.floor(slotVal / cols);
+          const base = getR6SquishRect(gcx, gcy, squishFactor);   // clean-full → mapped-mid
+          const dest = { x: base.x + slideXOff, y: base.y, w: base.w, h: base.h };
+          const angleDeg = f6Data[i][3];
+          const ix = Math.max(dest.x, r6x), iy = Math.max(dest.y, r6y);
+          const ix2 = Math.min(dest.x + dest.w, r6x + r6w);
+          const iy2 = Math.min(dest.y + dest.h, r6y + r6h);
+          if (ix2 <= ix || iy2 <= iy) continue;
+          clipRect(ix, iy, Math.ceil(ix2-ix), Math.ceil(iy2-iy));
+          const cImg = lastFrame.get(f6Data[i][1]*srcPx, f6Data[i][2]*srcPx, srcPx, srcPx);
+          drawRotatedFill(cImg, dest.x + dest.w/2, dest.y + dest.h/2, dest.w, dest.h, angleDeg);
+          noClip();
+        }
+      }
+
+      /* Squish capture → rotate 90° → store as capturedF6 for next cycle. */
+      function captureFrame6Squished() {
+        const squishFactor = R6_MID_FRAC;
+        const srcW = f6FullCapture.width, srcH = f6FullCapture.height;
+        const newH = Math.round(srcH * squishFactor);
+        const pg = p.createGraphics(srcW, newH);
+        pg.image(f6FullCapture, 0, 0, srcW, newH);
+        const squished = pg.get();
+        const pg2 = p.createGraphics(squished.height, squished.width);
+        pg2.translate(pg2.width/2, pg2.height/2);
+        pg2.rotate(p.HALF_PI);
+        pg2.imageMode(p.CENTER);
+        pg2.image(squished, 0, 0);
+        pg2.imageMode(p.CORNER);
+        capturedF6 = pg2.get();
+      }
+
+      function loopCurrent() {
+        resetCycle1();
+        f6Count2 = 0;
+        for (let i = 0; i < cols*rows; i++) f6Used[i] = false;
+        if (usingCapture && capturedF6 && capturedF6.width > 0 && capturedF6.height > 0) {
+          captureSmallH = capturedF6.height * (LOGICAL_R1_W / capturedF6.width);
+          slideY = -captureSmallH;
+        } else {
+          usingCapture = false;
+          slideY = -LOGICAL_R1_H;
+        }
+        stopAt = 0; slideT = 0;
+        p0state = 0; p0timer = 0; p1state = 0; p1timer = 0; expandT = 0;
+        phase = 0;
+        imageReady = true;
+      }
+
+      function tryLoadAndPlay(url, onFail) {
+        if (loadInProgress) { if (typeof onFail === "function") onFail(); return; }
+        loadInProgress = true;
+        const myToken = ++currentLoadToken;
+        const finishFail = (msg, err) => {
+          if (myToken !== currentLoadToken) return;
+          loadInProgress = false;
+          console.error("[load]", msg, err || "", "| url:", url);
+          if (typeof onFail === "function") onFail();
+        };
+        try {
+          p.loadImage(url, (loaded) => {
+            if (myToken !== currentLoadToken) return;
+            loadInProgress = false;
+            if (!loaded || !loaded.width || !loaded.height) { finishFail("invalid dimensions"); return; }
+            img = loaded;
+            usingCapture = false;
+            capturedF6 = null;
+            f6FullCapture = null;
+            initFromImage();
+          }, (err) => finishFail("load error", err));
+        } catch (e) { finishFail("threw exception", e); }
+      }
+
+      function tryNextFromQueue() {
+        if (imageQueue.length === 0) {
+          if (img || capturedF6) loopCurrent();
+          else { phase = -1; imageReady = false; }
+          return;
+        }
+        const url = imageQueue.shift();
+        imageReady = false;
+        phase = -1;
+        tryLoadAndPlay(cacheBust(url), () => { tryNextFromQueue(); });
+      }
+
+      function onCycleComplete() {
+        if (imageQueue.length > 0) tryNextFromQueue();
+        else loopCurrent();
+      }
+
+      /* ==== p5 lifecycle ==== */
+      let lastMouseMoveT = 0;   // cursor auto-hide (projection window only)
+      p.setup = () => {
+        const rect = container.getBoundingClientRect();
+        viewW = Math.max(1, Math.floor(rect.width));
+        viewH = Math.max(1, Math.floor(rect.height));
+        const cnv = p.createCanvas(viewW, viewH);
+        cnv.parent("sketch");
+        p.pixelDensity(Math.min(window.devicePixelRatio || 1, 2));
+        p.frameRate(60);
+        lastMouseMoveT = p.millis();   // for auto-hiding the cursor while projecting
+
+        /* If mapping didn't set r7x / r5x, derive from r2 / r3 defaults */
+        const gap = r2y - (r3y + r3h);
+        if (r7x < 0) r7x = r2x + r2w + gap;
+        if (r7ax < 0) { r7aw=Math.round(r7w*2/3); r7ax=r7x; r7ay=r7y; r7ah=r7h; }
+        if (r7bx < 0) { r7bw=r7w-r7aw; r7bx=r7x+r7aw; r7by=r7y; r7bh=r7h; }
+        if (r5x < 0) r5x = r3x + r3w - r5w;
+        if (r5rx < 0) { r5rx = r5x; r5ry = r5y; r5rw = r5w; r5rh = r5h; }
+        ROT_DEG_PER_FRAME = 360.0 * speed * 1.2;
+
+        initArrays();
+
+        sketchApi = {
+          isPlaying() { return imageReady; },
+          isLoading() { return loadInProgress; },
+          loadNext() {
+            if (loadInProgress) return;
+            if (imageQueue.length === 0 || imageReady) return;
+            tryNextFromQueue();
+          },
+          /* Load a local image (data URL from the upload UI). */
+          setImage(dataUrl) {
+            if (!dataUrl) return;
+            currentLoadToken++;        // invalidate any in-flight load
+            loadInProgress = false;
+            tryLoadAndPlay(dataUrl, () => {});
+          }
+        };
+
+        phase = -1; imageReady = false;   // black screen until the first upload
+      };
+
+      p.draw = () => {
+        /* Auto-hide the mouse while projecting: visible when you move it (e.g. to toggle
+           fullscreen), hidden after 2s of stillness over the canvas. Off-canvas the normal
+           cursor always shows, and the mapping window is unaffected. */
+        if (p.millis() - lastMouseMoveT > 2000) p.noCursor();
+        p.background(0,0,0);
+
+        const scale = Math.min(viewW/DESIGN_W, viewH/DESIGN_H);
+        const offsetX = (viewW - DESIGN_W*scale)/2;
+        const offsetY = (viewH - DESIGN_H*scale)/2;
+        p.push();
+        p.translate(offsetX, offsetY);
+        p.scale(scale);
+
+        if (phase === -1) { p.pop(); return; }
+
+        /* r1 right edge — used as trigger when sliding cell exits r1 area.
+           For non-rectangular r1, use the right edge of the rightmost column's first cell. */
+        const f1Right = r1x + r1w;
+
+        if (phase === 0) {
+          drawDarkestFrame();
+          /* Render incoming image into r1 bounding box at logical aspect ratio,
+             centered & scaled to fill r1 bbox while preserving logical proportions. */
+          const r1RenderRect = { x: r1x, y: r1y, w: r1w, h: r1h };
+
+          if (p0state === 0) {
+            if (usingCapture && capturedF6) {
+              slideT = Math.min(slideT + speed*1.5, 1.0);
+              drawIncomingCaptureDrop(slideT);   // PHASE 1: drop through slots (stays squished)
+              if (slideT >= 1.0) { p0state = 2; expandT = 0; }
+            } else {
+              drawIncomingSlice(slideY);
+              if (slideY < stopAt) slideY = Math.min(slideY + 1.5, stopAt);
+              else {
+                renderToFullImg();
+                analyzeDarkness();
+                precomputeBlurFramesInit();
+                p0state = 3;
+              }
+            }
+          } else if (p0state === 2) {
+            /* PHASE 2: now that it has dropped, un-squish 3/5 → full (vertical only) */
+            expandT = Math.min(expandT + speed*1.5, 1.0);
+            drawIncomingCaptureUnsquish(expandT);
+            if (expandT >= 1.0) {
+              slideY = 0;
+              renderToFullImg();
+              analyzeDarkness();
+              precomputeBlurFramesInit();
+              p0state = 3;
+            }
+          } else if (p0state === 3) {
+            if (usingCapture && capturedF6) {
+              drawIncomingCaptureUnsquish(1.0);
+            } else {
+              drawIncomingSlice(slideY);
+            }
+            if (precomputeBlurFramesStep(6)) { p0state = 1; p0timer = 0; }
+          } else if (p0state === 1) {
+            if (usingCapture && capturedF6) {
+              drawIncomingCaptureUnsquish(1.0);
+            } else {
+              drawIncomingSlice(slideY);
+            }
+            p0timer++;
+            if (p0timer >= 120) { phase=1; slideT=0; p1state=0; p1timer=0; }
+          }
+
+        } else if (phase === 1) {
+          const SHRINK_INC = 0.5 / 120;
+          if (p1state === 0) {
+            slideT = Math.min(slideT + SHRINK_INC, 0.5);
+            const sf = 1.0 - 0.5*Math.sin(slideT*Math.PI);
+            const bs = p.constrain(Math.floor(p.map(slideT, 0, 1, 0, blurSteps-1)), 0, blurSteps-1);
+            drawCells(sf, bs);
+            if (slideT >= 0.5) { p1state = 1; p1timer = 0; }
+          } else if (p1state === 1) {
+            const sf = 1.0 - 0.5*Math.sin(0.5*Math.PI);
+            const bs = p.constrain(Math.floor(p.map(0.5, 0, 1, 0, blurSteps-1)), 0, blurSteps-1);
+            drawCells(sf, bs);
+            p1timer++;
+            if (p1timer >= 60) p1state = 2;
+          } else if (p1state === 2) {
+            slideT = Math.min(slideT + SHRINK_INC, 1.0);
+            const sf = 1.0 - 0.5*Math.sin(slideT*Math.PI);
+            const bs = p.constrain(Math.floor(p.map(slideT, 0, 1, 0, blurSteps-1)), 0, blurSteps-1);
+            drawCells(sf, bs);
+            if (slideT >= 1.0) { p1state = 3; p1timer = 0; }
+          } else if (p1state === 3) {
+            drawCells(1.0, blurSteps-1);
+            p1timer++;
+            if (p1timer >= 30) { initIteration(); phase=2; slideT=0; fallT=0; }
+          }
+          drawDarkestFrame();
+
+        } else if (phase === 2) {
+          /* Cell sliding from its r1 column to r2 */
+          let startX=colScreenX[curCX];
+          slideT=Math.min(slideT+speed*1.5*sortSpeedMult,1.0);
+          let curX=p.lerp(startX,r2x,easeInOut(slideT));
+          if (curX>=f1Right) {
+            fallT=Math.min(fallT+speed*8.0*sortSpeedMult,1.0);
+            if (colDrops[curCX]===rows-1&&!colShiftActive) {
+              colShiftFrom=colScreenX.slice(); colShiftTo=colScreenX.slice();
+              colHomePrev=colHome.slice();
+              // Slide each column left of curCX rightward into the NEXT column's slot,
+              // adopting that column's mapped geometry (position + per-cell shape).
+              for(let cx=0;cx<curCX;cx++){
+                const nextSlot = Math.min(colHome[cx]+1, cols-1);
+                const step = r1cells[nextSlot].x - r1cells[colHome[cx]].x;
+                colShiftTo[cx]+=step;
+                colHome[cx]=nextSlot;            // now occupies the next mapped slot
+              }
+              shiftT=0; colShiftActive=true;
+            }
+          }
+          advanceShift();
+          drawFrame1(curCX,easeInOut(fallT));
+          drawCellAt(curX,r2y,curCX,curCY,r1x,r1y,r1w,r1h);
+          drawCellAt(curX,r2y,curCX,curCY,r2x,r2y,r2w,r2h);
+          drawPlacedCells(); drawDarkestFrame();
+          if (slideT>=1.0) { isDarkest=(cellCategory[curCY*cols+curCX]===2); phase=3; moveT=0; }
+
+        } else if (phase === 3) {
+          advanceShift(); drawFrame1(curCX,1.0); drawPlacedCells(); drawDarkestFrame();
+          let cat=cellCategory[curCY*cols+curCX];
+          moveT=Math.min(moveT+speed*1.5*sortSpeedMult,1.0);
+          let e=easeInOut(moveT);
+          if (isDarkest) {
+            let mx=p.lerp(r2x,r7x,e);
+            drawCellAt(mx,r2y,curCX,curCY,r2x,r2y,r2w,r2h);
+            /* Fade in as 2 parts WARPED to the mapped r7a/r7b quads (never a square). */
+            let fadeIn7=Math.floor(255*e);
+            const cs7=Math.floor(cell*QS);
+            const denom7=(r7aw+r7bw)>0?(r7aw+r7bw):cs7;
+            const splitW7=Math.round(cs7*(r7aw/denom7));
+            const okA7 = r7aPts && drawImageAffineQuad(lastFrame, curCX*cs7, curCY*cs7, splitW7, cs7, r7aPts, fadeIn7);
+            const okB7 = r7bPts && drawImageAffineQuad(lastFrame, curCX*cs7+splitW7, curCY*cs7, cs7-splitW7, cs7, r7bPts, fadeIn7);
+            if (!okA7 || !okB7) {
+              const dctx7=p.drawingContext; dctx7.imageSmoothingEnabled=false;
+              p.tint(255,fadeIn7);
+              if(!okA7) p.image(lastFrame, r7ax, r7ay, r7aw+1, r7ah, curCX*cs7, curCY*cs7, splitW7, cs7);
+              if(!okB7) p.image(lastFrame, r7bx, r7by, r7bw+1, r7bh, curCX*cs7+splitW7, curCY*cs7, cs7-splitW7, cs7);
+              p.noTint(); dctx7.imageSmoothingEnabled=true;
+            }
+          } else {
+            let fadeOut=Math.floor(255*(1.0-e)), fadeIn=Math.floor(255*e);
+            p.tint(255,fadeOut);
+            drawCellAt(r2x,r2y,curCX,curCY,r2x,r2y,r2w,r2h);
+            p.noTint();
+            if (cat===0) {
+              const cs=Math.floor(cell*QS),sb=[0,Math.round(cs/3),Math.round(cs*2/3),cs];
+              const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+              p.tint(255,fadeIn);
+              for(let s=0;s<3;s++){const part=r3parts[lightCount*3+s];if(!part)continue;
+                const sx=curCX*cs+sb[s],sy=curCY*cs,sw=sb[s+1]-sb[s];
+                if(!(part.pts && drawImageAffineQuad(lastFrame,sx,sy,sw,cs,part.pts,fadeIn)))
+                  p.image(lastFrame,part.x,part.y,part.w,part.h,sx,sy,sw,cs);}
+              p.noTint(); dctx.imageSmoothingEnabled=true;
+            } else {
+              const cs=Math.floor(cell*QS),sb=[0,Math.round(cs/3),Math.round(cs*2/3),cs];
+              const dctx=p.drawingContext; dctx.imageSmoothingEnabled=false;
+              p.tint(255,fadeIn);
+              for(let s=0;s<3;s++){const part=r4parts[darkCount*3+s];if(!part)continue;
+                const sx=curCX*cs+sb[s],sy=curCY*cs,sw=sb[s+1]-sb[s];
+                if(!(part.pts && drawImageAffineQuad(lastFrame,sx,sy,sw,cs,part.pts,fadeIn)))
+                  p.image(lastFrame,part.x,part.y,part.w,part.h,sx,sy,sw,cs);}
+              p.noTint(); dctx.imageSmoothingEnabled=true;
+            }
+          }
+          if (moveT>=1.0) completeIteration();
+
+        } else if (phase === 4) {
+          drawFrame1(-1, 0); drawPlacedCells(); drawDarkestFrame();
+          phase4timer++;
+          if (phase4timer > 90) { setupCycle(); startCycleStep(); }
+
+        } else if (phase === 5) {
+          outSlideT=Math.min(outSlideT+speed*1.5*cycleSpeedMult,1.0);
+          let fromLight=cycleOrder[cycleIter];
+          let startY=fromLight?r3y:r4y;
+          let curY=p.lerp(startY,r5y,easeInOut(outSlideT));
+          if (!stepShiftActive) {
+            let cleared=fromLight?(curY>r3y+r3h):(curY+cell<r4y);
+            if (cleared) { stepShiftActive=true; stepShiftT=0; }
+          }
+          if (stepShiftActive) stepShiftT=Math.min(stepShiftT+speed*3.0*cycleSpeedMult,1.0);
+          drawFrame1(-1,0); drawFrame3Out(fromLight); drawFrame4Out(!fromLight); drawDarkestFrame();
+          /* Draw exiting cell as 3 strips from r3/r4 parts, assembling at r5 */
+          const exitParts=fromLight?r3parts:r4parts;
+          const exitPartBase=fromLight?(lightCount-1)*3:(darkCount-1)*3;
+          const exitClip=fromLight?{x:r3x,y:r3y,w:r3w,h:r3h}:{x:r4x,y:r4y,w:r4w,h:r4h};
+          const cs=Math.floor(cell*QS);
+          const sb=[0,Math.round(cs/3),Math.round(cs*2/3),cs];
+          const e5=easeInOut(outSlideT);
+          const dctx5=p.drawingContext; dctx5.imageSmoothingEnabled=false;
+          for(let s=0;s<3;s++){
+            const part=exitParts[exitPartBase+s]; if(!part)continue;
+            const sx=p.lerp(part.x, r5x+s*(r5w/3), e5);
+            const sy=p.lerp(part.y, r5y, e5);
+            const sW=p.lerp(part.w, r5w/3, e5);
+            const sH=p.lerp(part.h, r5h, e5);
+            clipRect(exitClip.x,exitClip.y,exitClip.w,exitClip.h);
+            p.image(lastFrame,sx,sy,sW,sH,exitOrigCX*cs+sb[s],exitOrigCY*cs,sb[s+1]-sb[s],cs);
+            noClip();
+          }
+          dctx5.imageSmoothingEnabled=true;
+          /* Draw assembled cell clipped to r5 */
+          drawCellAt(r5x,curY,exitOrigCX,exitOrigCY,r5x,r5y,r5w,r5h);
+          drawFrame6(0);
+          if (outSlideT>=1.0) phase=6;
+
+        } else if (phase === 6) {
+          rotDeg = Math.min(rotDeg + ROT_DEG_PER_FRAME*cycleSpeedMult, rotAngle);
+          const displayRot = rotDeg * rotDirection;
+          const fromLight = cycleOrder[cycleIter];
+          if (stepShiftActive) stepShiftT = Math.min(stepShiftT + speed*3.0*cycleSpeedMult, 1.0);
+          drawFrame1(-1, 0);
+          drawFrame3Out(fromLight); drawFrame4Out(!fromLight);
+          drawDarkestFrame(); drawFrame6(0);
+          const cx5 = r5x + r5w/2.0, cy5 = r5y + r5h/2.0;
+          /* Draw rotating cell clipped to r5 (straight square) */
+          clipRect(r5x, r5y, r5w, r5h);
+          p.push(); p.translate(cx5, cy5); p.rotate(p.radians(displayRot));
+          p.imageMode(p.CENTER); p.image(exitCellImg, 0, 0, r5w, r5h);
+          p.imageMode(p.CORNER); p.pop();
+          noClip();
+          /* Draw rotating cell clipped to r5r (diamond quad) */
+          if(r5rPts) clipPoly(r5rPts); else clipRect(r5rx, r5ry, r5rw, r5rh);
+          const cx5r = r5rx + r5rw/2.0, cy5r = r5ry + r5rh/2.0;
+          p.push(); p.translate(cx5r, cy5r); p.rotate(p.radians(displayRot));
+          p.imageMode(p.CENTER); p.image(exitCellImg, 0, 0, cell, cell);
+          p.imageMode(p.CORNER); p.pop();
+          noClip();
+          if (rotDeg >= rotAngle) { phase = 7; toF6T = 0; }
+
+        } else if (phase === 7) {
+          toF6T=Math.min(toF6T+speed*1.5*cycleSpeedMult,1.0);
+          let displayRot=rotAngle*rotDirection;
+          let fromLight=cycleOrder[cycleIter];
+          if (stepShiftActive) stepShiftT=Math.min(stepShiftT+speed*3.0*cycleSpeedMult,1.0);
+          drawFrame1(-1,0); drawFrame3Out(fromLight); drawFrame4Out(!fromLight);
+          drawDarkestFrame(); drawFrame6(0);
+          if (f6Count2===0) {
+            let cx7=p.lerp(r5x,r6x,easeInOut(toF6T));
+            drawRotatedCellAt(cx7,r5y,displayRot,r5x,r5y,r5w,r5h);
+            drawRotatedCellAt(cx7,r5y,displayRot,r6x,r6y,r6w,r6h);
+          } else {
+            let cx7=p.lerp(r5x,r5x+r5w,easeInOut(toF6T));
+            drawRotatedCellAt(cx7,r5y,displayRot,r5x,r5y,r5w,r5h);
+          }
+          if (toF6T>=1.0) completeCycleStep();
+
+        } else if (phase === 8) {
+          drawFrame1(-1, 0); drawFrame3Out(false); drawFrame4Out(false);
+          if (p8state === 0) {
+            drawFrame6(0); drawDarkestFrame();
+            p8timer++;
+            if (p8timer >= 120) {
+              captureFrame6();
+              p8state = 1; squishT = 0;
+            }
+          } else if (p8state === 1) {
+            squishT = Math.min(squishT + speed*1.5, 1.0);
+            const sf = p.lerp(1.0, R6_MID_FRAC, easeInOut(squishT));
+            drawFrame6Squish(sf, 0);
+            drawDarkestFrame();
+            if (squishT >= 1.0) { p8state = 2; p8timer = 0; }
+          } else if (p8state === 2) {
+            drawFrame6Squish(R6_MID_FRAC, 0);
+            drawDarkestFrame();
+            p8timer++;
+            if (p8timer >= 120) { p8state = 3; f6SlideX = 0; }
+          } else if (p8state === 3) {
+            /* Slide squished r6 content off to the right (0 → r6w pixels) */
+            f6SlideX = Math.min(f6SlideX + 2.5, r6w);
+            darkestAlpha = 255 * (1.0 - f6SlideX / r6w);
+            drawFrame6Squish(R6_MID_FRAC, f6SlideX);
+            drawDarkestFrame();
+            if (f6SlideX >= r6w) {
+              captureFrame6Squished();
+              usingCapture = true; darkestVisible = false; darkestAlpha = 255;
+              p8state = 4; p8timer = 0;
+            }
+          } else if (p8state === 4) {
+            p8timer++;
+            if (p8timer >= 30) onCycleComplete();
+          }
+        }
+
+        /* Draw black frame outlines when toggled on (S key) */
+        if (showFrames) {
+          p.noFill(); p.stroke(0); p.strokeWeight(1.5);
+          p.rect(r1x, r1y, r1w, r1h);
+          p.rect(r2x, r2y, r2w, r2h);
+          p.rect(r3x, r3y, r3w, r3h);
+          p.rect(r4x, r4y, r4w, r4h);
+          p.rect(r5x, r5y, r5w, r5h);
+          if(r5rPts){p.beginShape();for(const pt of r5rPts)p.vertex(pt.x,pt.y);p.endShape(p.CLOSE);}
+          else{p.rect(r5rx, r5ry, r5rw, r5rh);}
+          p.rect(r6x, r6y, r6w, r6h);
+          p.rect(r7ax, r7ay, r7aw, r7ah);
+          p.rect(r7bx, r7by, r7bw, r7bh);
+        }
+
+        p.pop();
+      };
+
+      p.mouseMoved = () => {
+        p.cursor();                  // reveal cursor on movement
+        lastMouseMoveT = p.millis();
+      };
+
+      p.keyPressed = () => {
+        if (p.key === 's' || p.key === 'S') showFrames = !showFrames;
+      };
+
+      p.windowResized = () => {
+        const rect = container.getBoundingClientRect();
+        viewW = Math.max(1, Math.floor(rect.width));
+        viewH = Math.max(1, Math.floor(rect.height));
+        p.resizeCanvas(viewW, viewH);
+      };
+    };
+
+    new p5(sketch);
+
+    /* ===== Upload UI (local only — no server) ===== */
+    const pickFile = document.getElementById("pickFile");
+    const pickCam  = document.getElementById("pickCam");
+    const fileBtn  = document.getElementById("fileBtn");
+    const camBtn   = document.getElementById("camBtn");
+    const fab      = document.getElementById("fab");
+    const intro    = document.getElementById("intro");
+    const statusEl = document.getElementById("status");
+
+    function setStatus(html) {
+      if (!html) { statusEl.style.display = "none"; statusEl.innerHTML = ""; statusEl.classList.remove("err"); return; }
+      statusEl.innerHTML = html;
+      statusEl.style.display = "block";
+      statusEl.classList.toggle("err", html.indexOf("spin") === -1);
+    }
+
+    fileBtn.addEventListener("click", () => pickFile.click());
+    camBtn.addEventListener("click", () => pickCam.click());
+    // "jauns foto" brings back the choice screen
+    fab.addEventListener("click", () => { intro.style.display = "flex"; fab.style.display = "none"; });
+
+    async function toUsableBlob(file) {
+      const type = (file.type || "").toLowerCase();
+      const name = (file.name || "").toLowerCase();
+      const isHeic = type.includes("heic") || type.includes("heif") || name.endsWith(".heic") || name.endsWith(".heif");
+      if (!isHeic) return file;
+      setStatus('<span class="spin"></span>');
+      const out = await heic2any({ blob: file, toType: "image/jpeg", quality: 0.92 });
+      return Array.isArray(out) ? out[0] : out;
+    }
+
+    function loadIntoSketch(blob) {
+      setStatus('<span class="spin"></span>');
+      const url = URL.createObjectURL(blob);
+      const im = new Image();
+      im.onload = () => {
+        const maxDim = 1280;
+        let w = im.naturalWidth, h = im.naturalHeight;
+        const s = Math.min(1, maxDim / Math.max(w, h));
+        const cw = Math.max(1, Math.round(w * s)), ch = Math.max(1, Math.round(h * s));
+        const c = document.createElement("canvas");
+        c.width = cw; c.height = ch;
+        c.getContext("2d").drawImage(im, 0, 0, cw, ch);
+        URL.revokeObjectURL(url);
+        const dataUrl = c.toDataURL("image/jpeg", 0.9);
+        if (sketchApi) sketchApi.setImage(dataUrl);
+        intro.style.display = "none";
+        fab.style.display = "block";
+        setStatus("");
+      };
+      im.onerror = () => { URL.revokeObjectURL(url); setStatus("Neizdevās nolasīt bildi."); };
+      im.src = url;
+    }
+
+    async function handleFile(file) {
+      if (!file) return;
+      try { loadIntoSketch(await toUsableBlob(file)); }
+      catch (err) { console.error(err); setStatus("Ielāde neizdevās."); }
+    }
+
+    pickFile.addEventListener("change", (e) => { handleFile(e.target.files && e.target.files[0]); pickFile.value = ""; });
+    pickCam.addEventListener("change",  (e) => { handleFile(e.target.files && e.target.files[0]); pickCam.value  = ""; });
+  </script>
+</body>
+</html>
