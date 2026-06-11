@@ -26,7 +26,6 @@
 
     #intro { position:fixed; inset:0; z-index:10; display:flex; background:#ffffff; }
     .introInner { margin:auto; display:flex; flex-direction:column; align-items:center; gap:20px; padding:30px 24px; }
-    .orline { font-size:13px; color:#999; letter-spacing:.14em; text-transform:uppercase; }
 
     #fab { position:fixed; z-index:9; left:50%; transform:translateX(-50%);
       bottom:calc(18px + env(safe-area-inset-bottom)); display:none;
@@ -46,15 +45,12 @@
 
   <div id="intro">
     <div class="introInner">
-      <button class="btn" id="fileBtn">Izvēlies failu</button>
-      <div class="orline">vai</div>
       <button class="btn" id="camBtn">uzņem bildi</button>
     </div>
   </div>
 
   <button class="btn" id="fab">jauns foto</button>
 
-  <input id="pickFile" type="file" accept="image/*" style="display:none" />
   <input id="pickCam"  type="file" accept="image/*" capture="environment" style="display:none" />
 
   <script>
@@ -689,9 +685,7 @@
     new p5(sketch);
 
     /* ===== Upload UI (local only — no server) ===== */
-    const pickFile = document.getElementById("pickFile");
     const pickCam  = document.getElementById("pickCam");
-    const fileBtn  = document.getElementById("fileBtn");
     const camBtn   = document.getElementById("camBtn");
     const fab      = document.getElementById("fab");
     const intro    = document.getElementById("intro");
@@ -704,7 +698,6 @@
       statusEl.classList.toggle("err", html.indexOf("spin") === -1);
     }
 
-    fileBtn.addEventListener("click", () => pickFile.click());
     camBtn.addEventListener("click", () => pickCam.click());
     fab.addEventListener("click", () => { intro.style.display = "flex"; fab.style.display = "none"; });
 
@@ -747,7 +740,6 @@
       catch (err) { console.error(err); setStatus("Ielāde neizdevās."); }
     }
 
-    pickFile.addEventListener("change", (e) => { handleFile(e.target.files && e.target.files[0]); pickFile.value = ""; });
     pickCam.addEventListener("change",  (e) => { handleFile(e.target.files && e.target.files[0]); pickCam.value  = ""; });
   </script>
 </body>
