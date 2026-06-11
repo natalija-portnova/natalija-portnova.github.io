@@ -102,7 +102,7 @@
       let pauseStart=0;
       const PAUSE_MS=1000;                        // ~1s hold once fully in, before shrinking
       let loopT=0, blockW=204, blockH=204, rotatedBlock=null;
-      const LOOP_SPD=0.022;                       // speed of the slide-in → fall → stretch loop
+      const LOOP_SPD=0.008;                       // speed of the slide-in → fall → stretch loop
       const SLIDE_OUT_SPD=0.011;                  // slower slide-out of the last frame
       let capturedSquished=null, p9state=0, p9t=0;
       let f6Count2=0, f6Data=[], f6Used=[];
@@ -646,7 +646,7 @@
           }
 
         } else if (phase === 10) {           // slide DOWN into r1 from the top, clipped, already rotated
-          loopT = Math.min(loopT + SLIDE_OUT_SPD, 1.0);
+          loopT = Math.min(loopT + LOOP_SPD, 1.0);
           let by = p.lerp(r1y - blockH, r1y + r1h - blockH, easeInOut(loopT));
           clipRect(r1x, r1y, r1w, r1h);                        // only visible inside the first frame
           p.image(rotatedBlock, r1x, by, blockW, blockH);
