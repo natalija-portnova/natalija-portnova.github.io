@@ -102,7 +102,8 @@
       let pauseStart=0;
       const PAUSE_MS=1000;                        // ~1s hold once fully in, before shrinking
       let loopT=0, blockW=204, blockH=204, rotatedBlock=null;
-      const LOOP_SPD=0.022;                       // speed of the slide-out → fall → expand loop
+      const LOOP_SPD=0.022;                       // speed of the slide-in → fall → stretch loop
+      const SLIDE_OUT_SPD=0.011;                  // slower slide-out of the last frame
       let capturedSquished=null, p9state=0, p9t=0;
       let f6Count2=0, f6Data=[], f6Used=[];
       let capturedF6=null, usingCapture=false;
@@ -623,28 +624,15 @@
             }
           }
 
-        } else if (phase === 9) {            // slide squished block OUT of r6, left → right
-          loopT = Math.min(loopT + LOOP_SPD, 1.0);
+        } else if (phase === 9) {            // slide OUT of r6, clipped to r6 (vanishes at the edge)
+          loopT = Math.min(loopT + SLIDE_OUT_SPD, 1.0);
           let by0 = r6y + (r6h - blockH)/2;
-          let bx = p.lerp(r6x, DESIGN_W + 12, easeInOut(loopT));
+          let bx = p.lerp(r6x, r6x + r6w, easeInOut(loopT));   // exits past r6's right edge
+          clipRect(r6x, r6y, r6w, r6h);                        // only visible inside the last frame
           p.image(capturedF6, bx, by0, blockW, blockH);
-          if (loopT >= 1.0) { phase = 10; loopT = 0; }
-
-        } else if (phase === 10) {           // rotate 90° + slide DOWN into r1 from the top (clipped)
-          loopT = Math.min(loopT + LOOP_SPD, 1.0);
-          let e = easeInOut(loopT);
-          let by = p.lerp(r1y - blockH, r1y + r1h - blockH, e);   // from above r1 down to the bottom
-          let ang = p.HALF_PI * e;                                // spin 0 → 90° as it enters
-          clipRect(r1x, r1y, r1w, r1h);                          // only visible inside the frame
-          p.push();
-          p.translate(r1x + blockW/2, by + blockH/2);
-          p.rotate(ang);
-          p.imageMode(p.CENTER);
-          p.image(capturedF6, 0, 0, blockW, blockH);
-          p.imageMode(p.CORNER);
-          p.pop();
           noClip();
           if (loopT >= 1.0) {
+            // now invisible (outside the frame) — rotate 90° here
             rotatedBlock = p.createGraphics(Math.round(blockW), Math.round(blockH));
             rotatedBlock.pixelDensity(1);
             rotatedBlock.background(255,255,255);
@@ -655,8 +643,16 @@
             rotatedBlock.image(capturedF6, 0, 0, blockW, blockH);
             rotatedBlock.pop();
             rotatedBlock = rotatedBlock.get();
-            phase = 11; loopT = 0;
+            phase = 10; loopT = 0;
           }
+
+        } else if (phase === 10) {           // slide DOWN into r1 from the top, clipped, already rotated
+          loopT = Math.min(loopT + LOOP_SPD, 1.0);
+          let by = p.lerp(r1y - blockH, r1y + r1h - blockH, easeInOut(loopT));
+          clipRect(r1x, r1y, r1w, r1h);                        // only visible inside the first frame
+          p.image(rotatedBlock, r1x, by, blockW, blockH);
+          noClip();
+          if (loopT >= 1.0) { phase = 11; loopT = 0; }
 
         } else if (phase === 11) {           // stretch upward until it fills r1
           loopT = Math.min(loopT + LOOP_SPD, 1.0);
