@@ -101,7 +101,7 @@
       let imageAnalyzed=false;
       let pauseStart=0;
       const PAUSE_MS=1000;                        // ~1s hold once fully in, before shrinking
-      let loopT=0, blockW=204, blockH=204;
+      let loopT=0, blockW=204, blockH=204, rotatedBlock=null;
       const LOOP_SPD=0.022;                       // speed of the slide-out → fall → expand loop
       let capturedSquished=null, p9state=0, p9t=0;
       let f6Count2=0, f6Data=[], f6Used=[];
@@ -119,6 +119,7 @@
       function initFromImage() {
         if (!img) return;
         fullImg = p.createGraphics(Math.round(r1w), Math.round(r1h));
+        fullImg.pixelDensity(1);   // analysis samples logical pixels; avoid retina 2×/3× misalignment
         const k = Math.max(r1w / img.height, r1h / img.width);   // COVER (with 90° rotation)
         const fillH = img.width * k;
         slideY = -fillH / 2; stopAt = r1h / 2;
@@ -629,27 +630,46 @@
           p.image(capturedF6, bx, by0, blockW, blockH);
           if (loopT >= 1.0) { phase = 10; loopT = 0; }
 
-        } else if (phase === 10) {           // slide INTO r1 from the left, still squished
+        } else if (phase === 10) {           // rotate 90° + slide DOWN into r1 from the top (clipped)
           loopT = Math.min(loopT + LOOP_SPD, 1.0);
-          let bx = p.lerp(r1x - blockW - 12, r1x, easeInOut(loopT));
-          p.image(capturedF6, bx, r1y, blockW, blockH);
-          if (loopT >= 1.0) { phase = 11; loopT = 0; }
+          let e = easeInOut(loopT);
+          let by = p.lerp(r1y - blockH, r1y + r1h - blockH, e);   // from above r1 down to the bottom
+          let ang = p.HALF_PI * e;                                // spin 0 → 90° as it enters
+          clipRect(r1x, r1y, r1w, r1h);                          // only visible inside the frame
+          p.push();
+          p.translate(r1x + blockW/2, by + blockH/2);
+          p.rotate(ang);
+          p.imageMode(p.CENTER);
+          p.image(capturedF6, 0, 0, blockW, blockH);
+          p.imageMode(p.CORNER);
+          p.pop();
+          noClip();
+          if (loopT >= 1.0) {
+            rotatedBlock = p.createGraphics(Math.round(blockW), Math.round(blockH));
+            rotatedBlock.pixelDensity(1);
+            rotatedBlock.background(255,255,255);
+            rotatedBlock.push();
+            rotatedBlock.translate(blockW/2, blockH/2);
+            rotatedBlock.rotate(p.HALF_PI);
+            rotatedBlock.imageMode(p.CENTER);
+            rotatedBlock.image(capturedF6, 0, 0, blockW, blockH);
+            rotatedBlock.pop();
+            rotatedBlock = rotatedBlock.get();
+            phase = 11; loopT = 0;
+          }
 
-        } else if (phase === 11) {           // fall to the bottom of r1
-          loopT = Math.min(loopT + LOOP_SPD, 1.0);
-          let by = p.lerp(r1y, r1y + r1h - blockH, easeInOut(loopT));
-          p.image(capturedF6, r1x, by, blockW, blockH);
-          if (loopT >= 1.0) { phase = 12; loopT = 0; }
-
-        } else if (phase === 12) {           // expand upward until it fills r1
+        } else if (phase === 11) {           // stretch upward until it fills r1
           loopT = Math.min(loopT + LOOP_SPD, 1.0);
           let bh = p.lerp(blockH, r1h, easeInOut(loopT));
           let by = r1y + r1h - bh;           // bottom stays anchored
-          p.image(capturedF6, r1x, by, blockW, bh);
+          clipRect(r1x, r1y, r1w, r1h);
+          p.image(rotatedBlock, r1x, by, blockW, bh);
+          noClip();
           if (loopT >= 1.0) {
             fullImg = p.createGraphics(Math.round(r1w), Math.round(r1h));
+            fullImg.pixelDensity(1);
             fullImg.background(255,255,255);
-            fullImg.image(capturedF6, 0, 0, r1w, r1h);   // un-squished image fills r1
+            fullImg.image(rotatedBlock, 0, 0, r1w, r1h);   // un-squished image fills r1
             resetCycle1();
             f6Count2 = 0;
             for (let i = 0; i < cols*rows; i++) f6Used[i] = false;
