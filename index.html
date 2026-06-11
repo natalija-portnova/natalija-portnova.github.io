@@ -121,8 +121,8 @@
         if (!img) return;
         fullImg = p.createGraphics(Math.round(r1w), Math.round(r1h));
         fullImg.pixelDensity(1);   // analysis samples logical pixels; avoid retina 2×/3× misalignment
-        const k = Math.max(r1w / img.height, r1h / img.width);   // COVER (with 90° rotation)
-        const fillH = img.width * k;
+        const k = Math.max(r1w / img.width, r1h / img.height);   // COVER (natural orientation)
+        const fillH = img.height * k;
         slideY = -fillH / 2; stopAt = r1h / 2;
         imageAnalyzed = false;
         colScreenX   = [r1x, r1x+cell, r1x+2*cell];
@@ -136,11 +136,10 @@
 
       function renderToFullImg() {
         const src = (usingCapture && capturedF6) ? capturedF6 : img;
-        const k = Math.max(r1w / src.height, r1h / src.width);
+        const k = Math.max(r1w / src.width, r1h / src.height);   // COVER, natural orientation
         fullImg.push();
         fullImg.background(255,255,255);
         fullImg.translate(r1w/2, slideY);
-        fullImg.rotate(p.HALF_PI);
         fullImg.imageMode(p.CENTER);
         fullImg.image(src, 0, 0, src.width*k, src.height*k);
         fullImg.imageMode(p.CORNER);
@@ -647,7 +646,7 @@
           }
 
         } else if (phase === 10) {           // slide DOWN into r1 from the top, clipped, already rotated
-          loopT = Math.min(loopT + LOOP_SPD, 1.0);
+          loopT = Math.min(loopT + SLIDE_OUT_SPD, 1.0);
           let by = p.lerp(r1y - blockH, r1y + r1h - blockH, easeInOut(loopT));
           clipRect(r1x, r1y, r1w, r1h);                        // only visible inside the first frame
           p.image(rotatedBlock, r1x, by, blockW, blockH);
