@@ -99,8 +99,8 @@
       let outSlideT=0, toF6T=0, phase4timer=0;
       let rotDeg=0, rotAngle=0, rotDir=1, ROT_DEG_PER_FRAME;
       let imageAnalyzed=false;
-      let entranceStart=0, slideStartY=0, pauseStart=0;
-      const SLIDE_MS=550, PAUSE_MS=700;          // entrance: ~0.55s slide-in + ~0.7s hold
+      let pauseStart=0;
+      const PAUSE_MS=1000;                        // ~1s hold once fully in, before shrinking
       let loopT=0, blockW=204, blockH=204;
       const LOOP_SPD=0.022;                       // speed of the slide-out → fall → expand loop
       let capturedSquished=null, p9state=0, p9t=0;
@@ -122,7 +122,6 @@
         const k = Math.max(r1w / img.height, r1h / img.width);   // COVER (with 90° rotation)
         const fillH = img.width * k;
         slideY = -fillH / 2; stopAt = r1h / 2;
-        slideStartY = slideY; entranceStart = p.millis();
         imageAnalyzed = false;
         colScreenX   = [r1x, r1x+cell, r1x+2*cell];
         colShiftFrom = colScreenX.slice();
@@ -489,17 +488,13 @@
 
         if (phase === 0) {
           renderToFullImg();
-          let el = p.millis() - entranceStart;
-          if (el < SLIDE_MS) {
-            slideY = p.lerp(slideStartY, stopAt, el / SLIDE_MS);  // slide in (time-based)
-          } else {
-            slideY = stopAt;
-            if (!imageAnalyzed) {
-              analyzeDarkness(); precomputeBlurFrames();
-              imageAnalyzed = true; pauseStart = p.millis();
-            } else if (p.millis() - pauseStart >= PAUSE_MS) {     // hold fully in, then shrink
-              phase = 1; slideT = 0;
-            }
+          if (slideY < stopAt) {
+            slideY = Math.min(slideY + 1.5, stopAt);            // original slide-in speed
+          } else if (!imageAnalyzed) {
+            analyzeDarkness(); precomputeBlurFrames();
+            imageAnalyzed = true; pauseStart = p.millis();
+          } else if (p.millis() - pauseStart >= PAUSE_MS) {     // ~1s hold, then shrink
+            phase = 1; slideT = 0;
           }
           clipRect(r1x, r1y, r1w, r1h);
           p.image(fullImg, r1x, r1y);
