@@ -394,7 +394,7 @@
           p.translate(sx + cell/2.0, sy + cell/2.0);
           p.rotate(p.radians(angleDeg));
           p.imageMode(p.CENTER);
-          p.image(c, 0, 0, cell, cell);
+          p.image(c, 0, 0, cell + 2, cell + 2);   // slight overlap hides seams while scaling
           p.imageMode(p.CORNER);
           p.pop();
         }
@@ -432,7 +432,7 @@
           pg.translate(sx + cell/2.0, sy + cell/2.0);
           pg.rotate(p.radians(angleDeg));
           pg.imageMode(p.CENTER);
-          pg.image(c, 0, 0, cell, cell);
+          pg.image(c, 0, 0, cell + 2, cell + 2);   // match: no seams in the captured block
           pg.imageMode(p.CORNER);
           pg.pop();
         }
